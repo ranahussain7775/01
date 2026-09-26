@@ -1,0 +1,21 @@
+# Environment file - Railway-এ manually add করবেন
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyc
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Data files (optional - রাখতে চাইলে এগুলো remove করুন)
+# active_numbers.json
+# paid_sms.json
+# users.json
+
+# Temp files
+*.log
+find_endpoint.py

@@ -1,23 +1,23 @@
 {
-  "welcome_message": "👋 Welcome to AutoSyncX Bot!\n\n🚀 Use the menu below to start.",
-  "maintenance_mode": false,
-
-  "api_key": "3e725522f5759b8212776aed6c615f1a6f1da525",
+  "api_key": "2f477fa8bfa2ae3a153274e4960d1ff210ac65cb",
   "base_url": "https://axnumberserver.shop/number/api",
-  "otp_group_id": "-1004372443286",
-  "otp_group_url": "https://t.me/myotpchannel",
-  "channel_url": "https://t.me/myotpchannel",
-  "support_username": "admin",
-
+  "otp_group_id": "@freeotp01",
+  "otp_group_url": "https://t.me/freeotp01",
+  "channel_url": "https://t.me/freeotpoffical",
+  "support_username": "@rxrana000",
+  "maintenance_mode": false,
   "min_withdraw": 0.5,
   "max_withdraw": 100.0,
   "cooldown_time": 1.0,
   "otp_reward": 0.002,
   "refer_bonus": 0.05,
   "numbers_per_request": 1,
-
-  "force_join_enabled": false,
-  "force_join_channels": ["@your_channel"],
+  "force_join_enabled": true,
+  "force_join_channels": [
+    "@freeotpoffical",
+    "@freeotp01"
+  ],
   "join_alert_enabled": true,
-  "auto_range": true
+  "auto_range": true,
+  "live_console_enabled": false
 }

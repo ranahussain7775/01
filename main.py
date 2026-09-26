@@ -10,7 +10,7 @@ import string
 import time
 import unicodedata
 from datetime import datetime, timedelta
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from telegram.request import HTTPXRequest
 
@@ -51,7 +51,7 @@ DEFAULT_SETTINGS = {
     "refer_bonus": 0.050,
     "numbers_per_request": 1,
     "force_join_enabled": False,
-    "force_join_channels": ["@your_chanel"],
+    "force_join_channels": ["@freeotpoffical"],
     "join_alert_enabled": True,
     "auto_range": True
 }
@@ -60,11 +60,11 @@ DEFAULT_SETTINGS = {
 
 def load_settings():
     if not os.path.exists(SETTINGS_FILE):
-        with open(SETTINGS_FILE, "w") as f:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
             json.dump(DEFAULT_SETTINGS, f, indent=2)
         return DEFAULT_SETTINGS
     try:
-        with open(SETTINGS_FILE, "r") as f:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         updated = False
         for k, v in DEFAULT_SETTINGS.items():
@@ -74,7 +74,8 @@ def load_settings():
         if updated:
             save_settings(data)
         return data
-    except:
+    except Exception as e:
+        print(f"Error loading settings: {e}")
         return DEFAULT_SETTINGS
 
 def save_settings(settings):
@@ -189,13 +190,37 @@ def generate_payment_id():
 def extract_otp(text):
     if not text or text == "No Content": return "N/A"
     text_clean = str(text).strip()
-    label_match = re.search(r'(?:code|otp|verify|verification|pin|confirmation|kod|passcode)[\s:-]+([a-zA-Z0-9]{3,10})\b', text_clean, re.IGNORECASE)
-    if label_match: return label_match.group(1).strip()
+
+    # 1. ✅ "DIGITS is your verification/code" — TikTok, FB style
+    # Example: "[#][TikTok] 047100 is your verification code"
+    digits_before = re.search(r'\b(\d{4,8})\s+is\s+your', text_clean, re.IGNORECASE)
+    if digits_before: return digits_before.group(1).strip()
+
+    # 2. ✅ "code is DIGITS" or "code: DIGITS" — digits only, NOT words
+    code_then_digits = re.search(
+        r'(?:code|otp|pin|passcode|verification|verify|token)[:\s]+(\d{4,8})\b',
+        text_clean, re.IGNORECASE
+    )
+    if code_then_digits: return code_then_digits.group(1).strip()
+
+    # 3. ✅ "#DIGITS" — hash prefix style
+    hash_code = re.search(r'#(\d{4,8})\b', text_clean)
+    if hash_code: return hash_code.group(1).strip()
+
+    # 4. ✅ Spaced OTP "123 456" or "123-456"
     spaced_otp = re.search(r'\b(\d{3}[\s-]\d{3})\b', text_clean)
     if spaced_otp: return spaced_otp.group(1)
+
+    # 5. ✅ Exactly 6-digit code (most common OTP)
+    six_digit = re.search(r'\b(\d{6})\b', text_clean)
+    if six_digit: return six_digit.group(1)
+
+    # 6. ✅ 4-8 digit fallback
     digit_match = re.search(r'\b(\d{4,8})\b', text_clean)
     if digit_match: return digit_match.group(1)
+
     return "N/A"
+
 
 def load_country_map(filename="Country.txt"):
     country_map = {}
@@ -362,10 +387,14 @@ def admin_main_keyboard():
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def admin_system_config_keyboard():
+    settings = load_settings()
+    live_on = settings.get("live_console_enabled", True)
+    live_btn = "🟢 LIVE CONSOLE: ON" if live_on else "🔴 LIVE CONSOLE: OFF"
     keyboard = [
         [KeyboardButton("🔑 SET API KEY"), KeyboardButton("🌐 SET API BASE URL")],
         [KeyboardButton("📢 SET OTP CHANNEL ID"), KeyboardButton("💰 SET WITHDRAW LIMITS")],
         [KeyboardButton("🎁 SET REFER BONUS"), KeyboardButton("⏱ SET COOLDOWN")],
+        [KeyboardButton(live_btn)],
         [KeyboardButton("🚫 TOGGLE MAINTENANCE"), KeyboardButton("🔙 BACK TO ADMIN")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -411,6 +440,8 @@ request_queue = asyncio.Queue()
 active_numbers = load_json(ACTIVE_NUMBERS_FILE, {})
 last_range = {}
 last_request_time = {}
+seen_skipped = set()  # same number baar baar SKIP log না করার জন্য
+seen_group = set()    # group-এ already posted OTP track করার জন্য
 
 # ==================== API FUNCTIONS ====================
 
@@ -420,7 +451,8 @@ async def fetch_top_ranges():
     base_url = settings.get("base_url").rstrip('/')
     
     try:
-        url = f"{base_url}/liveaccess?api_key={api_key}"
+        # ✅ সঠিক endpoint: ?key=...&action=numbers
+        url = f"{base_url}?key={api_key}&action=numbers"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept": "application/json"
@@ -434,7 +466,22 @@ async def fetch_top_ranges():
             data = r.json()
         except Exception:
             return None, f"HTML Page Received instead of JSON: {r.text[:100]}"
-        
+
+        # API response: {"meta": {"code": 200, "status": "ok"}, "data": {...}}
+        # OR legacy: {"status": "success", "data": {...}}
+        meta = data.get("meta", {}) if isinstance(data, dict) else {}
+        top_status = data.get("status") if isinstance(data, dict) else None
+        meta_status = meta.get("status") if isinstance(meta, dict) else None
+        meta_code = meta.get("code") if isinstance(meta, dict) else None
+
+        is_ok = (
+            top_status in ("success", "ok", True, 1) or
+            meta_status in ("success", "ok") or
+            meta_code == 200
+        )
+        if not is_ok and isinstance(data, dict) and "data" not in data and "services" not in data:
+            return None, f"API Error: {data}"
+
         top_ranges = {}
         services_list = []
 
@@ -477,11 +524,12 @@ async def fetch_number_async(range_str):
         settings = load_settings()
         api_key = settings.get("api_key")
         base_url = settings.get("base_url").rstrip('/')
-        url = f"{base_url}/getnumber"
         clean_rid = clean_range_id(range_str)
-        
+
+        # ✅ সঠিক param: key= (আগে api_key= ছিল যা ভুল)
+        url = f"{base_url}/getnumber"
         params = {
-            "api_key": api_key,
+            "key": api_key,
             "rid": clean_rid,
             "national": 1,
             "remove_plus": 1
@@ -512,41 +560,92 @@ async def worker():
             chat_id = task['chat_id']
             context = task['context']
             range_text = task['range_text']
+            app_name = task.get('app_name', 'Facebook')
             
-            status_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ <b>SEARCHING NUMBER...</b>", parse_mode="HTML")
-            result = await fetch_number_async(range_text)
-            
-            if not result:
-                await status_msg.edit_text("❌ <b>NO NUMBER FOUND. TRY AGAIN LATER.</b>", parse_mode="HTML")
-            else:
-                clean_num = normalize_number(result)
-                active_numbers[clean_num] = {"uid": uid, "range": range_text, "timestamp": datetime.now().isoformat()}
-                save_json(ACTIVE_NUMBERS_FILE, active_numbers)
-                add_number_taken(uid, 1)
-                
-                flag, c_name = get_country_info(clean_num)
-                settings = load_settings()
-                
-                txt = (
-                    f"<blockquote>"
-                    f"📱 <b>YOUR NUMBER DETAILS</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🌐 <b>Country:</b> {flag} {c_name}\n"
-                    f"📞 <b>Number:</b> <code>+{clean_num}</code>\n"
-                    f"⚡ <b>Success Rate:</b> 90%\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"⏳ <b>SMS STATUS:</b> Waiting for message...\n"
-                    f"</blockquote>"
+            status_msg = await context.bot.send_message(
+                chat_id=chat_id, 
+                text="⏳ <b>SEARCHING NUMBER...</b>", 
+                parse_mode="HTML"
+            )
+
+            numbers = []
+
+            # 🔥 3 ta number fetch
+            for i in range(3):
+                num = await fetch_number_async(range_text)
+                if num:
+                    numbers.append(num)
+
+            # ❌ jodi number na pao
+            if not numbers:
+                await status_msg.edit_text(
+                    "❌ <b>NO NUMBER FOUND. TRY AGAIN LATER.</b>", 
+                    parse_mode="HTML"
                 )
-                kb = InlineKeyboardMarkup([
-                    [rbtn("🔄 Change Number", style="primary", callback_data="same_range")],
-                    [rbtn("📢 OTP Channel", style="success", url=settings.get("channel_url"))]
+                continue
+
+            buttons = []
+
+            # 👉 first number diye country info
+            first_num = normalize_number(numbers[0])
+            flag, c_name = get_country_info(first_num)
+
+            # ✅ HEADER
+            icon = get_service_icon(app_name)
+            txt = (
+                "⏳ These numbers are activated and ready to receive SMS.\n\n"
+                f"• <b>Service:</b> {app_name} {icon}\n"
+                f"• <b>Country:</b> {flag} {c_name}\n\n"
+            )
+
+            # 🔥 NUMBER BUTTONS
+            for num in numbers:
+                clean_num = normalize_number(num)
+
+                # save number
+                active_numbers[clean_num] = {
+                    "uid": uid,
+                    "range": range_text,
+                    "timestamp": datetime.now().isoformat()
+                }
+
+                # number button — 1 click copy
+                buttons.append([
+                    InlineKeyboardButton(
+                        text=f"📋 {flag} +{clean_num}",
+                        copy_text=CopyTextButton(text=f"+{clean_num}")
+                    )
                 ])
-                await status_msg.edit_text(txt, parse_mode="HTML", reply_markup=kb)
+
+            save_json(ACTIVE_NUMBERS_FILE, active_numbers)
+            add_number_taken(uid, len(numbers))
+
+            settings = load_settings()
+
+            # ✅ Change Country & Change Number buttons
+            buttons.append([
+                rbtn("🌍 Change Country", callback_data="change_country"),
+                rbtn("🔄 Change Number", callback_data="same_range")
+            ])
+
+            buttons.append([
+                rbtn("📢 OTP Group", url=settings.get("channel_url"))
+            ])
+
+            kb = InlineKeyboardMarkup(buttons)
+
+            await status_msg.edit_text(
+                txt,
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+
         except Exception as e:
             print(f"Worker Exception: {e}")
+
         finally:
             request_queue.task_done()
+
 
 # ==================== AUTO MONITOR LOOP ====================
 
@@ -556,77 +655,203 @@ async def monitor_loop(app):
             settings = load_settings()
             api_key = settings.get("api_key")
             base_url = settings.get("base_url").rstrip('/')
-            otp_target = settings.get("otp_group_id")
+            otp_target_raw = settings.get("otp_group_id", "")
             otp_reward = settings.get("otp_reward", 0.0020)
-            
+
+            # otp_group_id কে সঠিক format-এ convert করা (int বা @username)
+            try:
+                otp_target = int(str(otp_target_raw).strip())
+            except:
+                otp_target = str(otp_target_raw).strip()
+
             if api_key:
-                r = await client_async.get(f"{base_url}/success_otp?api_key={api_key}")
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # ✅ PART 1: Live Console endpoint → সব OTP group-এ
+                # Browser DevTools-এ পাওয়া: /number/api/console
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                console_otps = []
+                try:
+                    rc = await client_async.get(
+                        f"{base_url}/console?api_key={api_key}", timeout=8.0
+                    )
+                    rc_data = rc.json()
+                    inner = rc_data.get("data", {})
+                    if isinstance(inner, dict):
+                        console_otps = inner.get("hits") or inner.get("otps") or []
+                    elif isinstance(inner, list):
+                        console_otps = inner
+                except Exception as ce:
+                    print(f"[CONSOLE ERROR] {ce}")
+
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # ✅ PART 2: action=sms → user reward tracking
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                r = await client_async.get(f"{base_url}?key={api_key}&action=sms")
                 res = r.json()
-                
+
                 otps = []
-                if isinstance(res, dict):
-                    otps = res.get("data") or res.get("otps") or []
+                if isinstance(res, dict) and res.get("status") in ("success", "ok", True, 1):
+                    otps = res.get("otps") or res.get("data") or []
                 elif isinstance(res, list):
                     otps = res
+
+                # console OTPs → group only (admin ON/OFF দিয়ে control)
+                live_console_enabled = settings.get("live_console_enabled", True)
+                if otp_target and console_otps and live_console_enabled:
+                    channel_url = settings.get("channel_url", "")
+                    for hit in console_otps:
+                        if not isinstance(hit, dict): continue
+                        full_sms = (hit.get("message") or "").strip()
+                        service  = (hit.get("sid") or hit.get("service") or "").strip()
+                        range_id = (hit.get("range") or "").strip()
+                        hit_time = str(hit.get("time", ""))
+                        if not full_sms or not service: continue
+
+                        # ✅ শুধু Facebook OTP group-এ যাবে
+                        if "facebook" not in service.lower():
+                            continue
+
+                        otp_code = extract_otp(full_sms)
+                        if not otp_code or otp_code == "N/A": continue
+
+                        c_otp_id = f"console_{range_id}_{otp_code}_{hit_time}"
+                        if c_otp_id in seen_group: continue
+                        seen_group.add(c_otp_id)
+
+                        svc_icon      = get_service_icon(service)
+                        service_title = service.title()
+                        flag, c_name  = get_country_info(range_id.replace("X",""))
+
+                        group_msg = (
+                            f"{svc_icon} <b>{service_title}</b> • 🌐 English\n"
+                            f"{flag} {c_name} • <code>{range_id}</code>\n\n"
+                            f"🔔 {html.escape(full_sms)}"
+                        )
+                        group_kb_buttons = [
+                            InlineKeyboardButton(
+                                text=f"📋 {otp_code}",
+                                copy_text=CopyTextButton(text=otp_code)
+                            )
+                        ]
+                        if channel_url:
+                            group_kb_buttons.append(
+                                InlineKeyboardButton("🤖 OTP Group", url=channel_url)
+                            )
+                        kb = InlineKeyboardMarkup([group_kb_buttons])
+                        try:
+                            await app.bot.send_message(
+                                otp_target, group_msg,
+                                parse_mode="HTML", reply_markup=kb
+                            )
+                            # ✅ Terminal-এ [LIVE] log hide — শুধু error দেখাবে
+                        except Exception as e:
+                            print(f"[ERROR] Console→Group: {e}")
 
                 if otps:
                     paid_data = load_json(PAID_SMS_FILE, {})
                     for otp in otps:
                         if not isinstance(otp, dict): continue
-                        num = normalize_number(otp.get("number") or otp.get("phone") or "")
-                        full_sms = otp.get("message") or otp.get("sms") or "No SMS Content"
-                        otp_code = otp.get("otp_code") or extract_otp(full_sms)
-                        otp_id = str(otp.get("otp_id", f"{num}_{otp_code}"))
 
+                        num = normalize_number(
+                            otp.get("number") or otp.get("phone") or ""
+                        )
+                        if not num:
+                            continue
+
+                        full_sms = (
+                            otp.get("message") or otp.get("sms") or
+                            otp.get("text") or otp.get("body") or otp.get("content") or ""
+                        ).strip()
+
+                        otp_code = (otp.get("code") or otp.get("otp_code") or "").strip()
+                        if not otp_code and full_sms:
+                            otp_code = extract_otp(full_sms)
+
+                        # time-based unique ID (API-এর time field ব্যবহার)
+                        otp_time = str(otp.get("time", ""))
+                        otp_id = str(otp.get("otp_id", f"{num}_{otp_code}_{otp_time}"))
+
+                        if not full_sms or not otp_code or otp_code == "N/A":
+                            if otp_id not in seen_skipped:
+                                seen_skipped.add(otp_id)
+                                print(f"[SKIP] num={num} | no real OTP content.")
+                            continue
+
+                        flag, c_name = get_country_info(num)
+                        service = detect_service(full_sms)
+                        svc_icon = get_service_icon(service)
+                        service_title = service.title()
+                        masked_num = mask_number(num)
+                        channel_url = settings.get("channel_url", "")
+
+                        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                        # ✅ সব OTP → OTP Group-এ post (seen_group দিয়ে duplicate avoid)
+                        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                        if otp_target and otp_id not in seen_group:
+                            seen_group.add(otp_id)
+                            group_msg = (
+                                f"{svc_icon} <b>{service_title}</b> • 🌐 English\n"
+                                f"{flag} {c_name} • <code>{masked_num}</code>\n\n"
+                                f"🔔 {html.escape(full_sms)}"
+                            )
+                            group_kb_buttons = [
+                                InlineKeyboardButton(
+                                    text=f"📋 {otp_code}",
+                                    copy_text=CopyTextButton(text=otp_code)
+                                )
+                            ]
+                            if channel_url:
+                                group_kb_buttons.append(
+                                    InlineKeyboardButton("🤖 OTP Group", url=channel_url)
+                                )
+                            kb = InlineKeyboardMarkup([group_kb_buttons])
+                            try:
+                                await app.bot.send_message(
+                                    otp_target, group_msg,
+                                    parse_mode="HTML", reply_markup=kb
+                                )
+                                print(f"[GROUP] {service_title} | {num} | otp={otp_code}")
+                            except Exception as e:
+                                print(f"[ERROR] Group post failed ({otp_target}): {e}")
+
+                        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                        # ✅ User-এর number হলে → reward + personal notification
+                        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                         if num in active_numbers and otp_id not in paid_data:
                             details = active_numbers[num]
                             user_id = details["uid"]
                             paid_data[otp_id] = True
                             save_json(PAID_SMS_FILE, paid_data)
-                            
-                            # Reward & Log
+
                             await update_db_balance(user_id, otp_reward)
                             add_otp_received(user_id)
-                            log_global_activity(user_id, "OTP_RECEIVED", {"number": num, "otp": otp_code, "sms": full_sms})
-                            
-                            flag, c_name = get_country_info(num)
-                            service = detect_service(full_sms)
-                            masked_num = mask_number(num)
-                            
-                            # Send to User
-                            user_msg = (
-                                f"✅ <b>OTP RECEIVED SUCCESSFULLY!</b>\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"📞 <b>Number:</b> <code>+{num}</code>\n"
-                                f"🔑 <b>OTP:</b> <code>{otp_code}</code>\n"
-                                f"💰 <b>Bonus:</b> <code>+{otp_reward:.4f}$ Credited</code>\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"💬 <b>Full SMS:</b>\n<code>{html.escape(full_sms)}</code>\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━"
-                            )
-                            try:
-                                await app.bot.send_message(user_id, user_msg, parse_mode="HTML")
-                            except: pass
+                            log_global_activity(user_id, "OTP_RECEIVED", {
+                                "number": num, "otp": otp_code, "sms": full_sms
+                            })
 
-                            # Send to OTP Channel
-                            group_msg = (
-                                f"🚀 <b>LIVE OTP RECEIVED</b>\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"⚙️ <b>Service:</b> <code>{service}</code>\n"
-                                f"📞 <b>Mobile:</b> <code>{masked_num}</code>\n"
-                                f"🌐 <b>Country:</b> {flag} {c_name}\n"
-                                f"🔑 <b>OTP Code:</b> <code>{otp_code}</code>\n"
-                                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                                f"💬 <b>SMS:</b>\n<code>{html.escape(full_sms)}</code>"
+                            user_msg = (
+                                f"{svc_icon} <b>{service_title}</b> • 🌐 OTP\n"
+                                f"{flag} {c_name} • <code>+{num}</code>\n\n"
+                                f"🔔 <b>{html.escape(full_sms)}</b>\n\n"
+                                f"💰 <b>Bonus:</b> <code>+{otp_reward:.4f}$ Credited</code>"
                             )
-                            kb = InlineKeyboardMarkup([[InlineKeyboardButton("📢 JOIN PANEL", url=settings.get("channel_url"))]])
+                            user_kb = InlineKeyboardMarkup([[
+                                InlineKeyboardButton(
+                                    text=f"📋 {otp_code}",
+                                    copy_text=CopyTextButton(text=otp_code)
+                                )
+                            ]])
                             try:
-                                await app.bot.send_message(otp_target, group_msg, parse_mode="HTML", reply_markup=kb)
+                                await app.bot.send_message(
+                                    int(user_id), user_msg,
+                                    parse_mode="HTML", reply_markup=user_kb
+                                )
+                                print(f"[USER] Sent to {user_id} | num=+{num} | otp={otp_code}")
                             except Exception as e:
-                                print(f"Failed to post to OTP Channel ({otp_target}): {e}")
+                                print(f"[ERROR] User notify failed ({user_id}): {e}")
 
         except Exception as e:
-            pass
+            print(f"[monitor_loop ERROR] {e}")
         await asyncio.sleep(1.0)
 
 # ==================== MAIN HANDLER ====================
@@ -664,8 +889,8 @@ async def check_force_sub(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         buttons.append([rbtn("🔄 Verify / Check", style="success", callback_data="check_join")])
 
         msg = (
-            "⚠️ <b>বটটি ব্যবহার করতে আমাদের চ্যানেলে জয়েন করুন!</b>\n\n"
-            "দয়া করে নিচের চ্যানেলে জয়েন হয়ে <b>Verify / Check</b> বাটনে ক্লিক করুন:"
+            "⚠️ <b>বটটি ব্যবহার করতে আমাদের চ্যানেলে জয়েন করুন!</b>\n\n"
+            "দয়া করে নিচের চ্যানেলে জয়েন হয়ে <b>Verify / Check</b> বাটনে ক্লিক করুন:"
         )
         if update.message:
             await update.message.reply_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
@@ -714,14 +939,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     settings = load_settings()
     text = settings.get("welcome_message") or "👋 Welcome to AutoSyncX Bot!"
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    settings = load_settings()
-    text = settings.get("welcome_message") or "👋 Welcome!"
-
     await update.message.reply_text(
         text,
         parse_mode="HTML",
-        reply_markup=main_keyboard(update.effective_user.id)
+        reply_markup=main_keyboard(uid)
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -879,9 +1100,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 settings["force_join_channels"] = channels
                 settings["force_join_enabled"] = True
                 save_settings(settings)
-                await update.message.reply_text(f"✅ Channel <code>{ch}</code> যোগ করা হয়েছে!", parse_mode="HTML", reply_markup=admin_force_channel_keyboard())
+                await update.message.reply_text(f"✅ Channel <code>{ch}</code> যোগ করা হয়েছে!", parse_mode="HTML", reply_markup=admin_force_channel_keyboard())
             else:
-                await update.message.reply_text("❌ এই চ্যানেলটি আগেই তালিকায় রয়েছে!", reply_markup=admin_force_channel_keyboard())
+                await update.message.reply_text("❌ এই চ্যানেলটি আগেই তালিকায় রয়েছে!", reply_markup=admin_force_channel_keyboard())
         elif edit_mode == "del_force_channel":
             ch = raw_text.strip()
             channels = settings.get("force_join_channels", [])
@@ -889,9 +1110,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 channels.remove(ch)
                 settings["force_join_channels"] = channels
                 save_settings(settings)
-                await update.message.reply_text(f"✅ Channel <code>{ch}</code> তালিকা থেকে মুছে ফেলা হয়েছে!", parse_mode="HTML", reply_markup=admin_force_channel_keyboard())
+                await update.message.reply_text(f"✅ Channel <code>{ch}</code> তালিকা থেকে মুছে ফেলা হয়েছে!", parse_mode="HTML", reply_markup=admin_force_channel_keyboard())
             else:
-                await update.message.reply_text("❌ চ্যানেলটি তালিকায় পাওয়া যায়নি!", reply_markup=admin_force_channel_keyboard())
+                await update.message.reply_text("❌ চ্যানেলটি তালিকায় পাওয়া যায়নি!", reply_markup=admin_force_channel_keyboard())
                 
         elif edit_mode == "direct_msg":
             parts = raw_text.split(maxsplit=1)
@@ -1123,6 +1344,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🛠 Maintenance Mode is now: <b>{status}</b>", parse_mode="HTML")
         return
 
+    # ✅ Live Console ON/OFF toggle (শুধু Admin)
+    if ("LIVE CONSOLE" in text.upper()) and is_admin(uid):
+        settings = load_settings()
+        current = settings.get("live_console_enabled", True)
+        settings["live_console_enabled"] = not current
+        save_settings(settings)
+        new_state = settings["live_console_enabled"]
+        icon = "🟢" if new_state else "🔴"
+        state_text = "ON" if new_state else "OFF"
+        await update.message.reply_text(
+            f"{icon} <b>Live Console Facebook OTP:</b> <b>{state_text}</b>\n\n"
+            f"{'✅ এখন Facebook OTP group-এ আসবে।' if new_state else '⛔ Facebook OTP group-এ আসবে না।'}",
+            parse_mode="HTML",
+            reply_markup=admin_system_config_keyboard()
+        )
+        return
+
     # --- ADMIN USER & BALANCE ---
     if text == "➕ ADD BALANCE" and is_admin(uid):
         context.user_data["admin_edit_mode"] = "add_balance"
@@ -1209,15 +1447,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.delete()
             except:
                 pass
-            await query.message.reply_text("✅ ধন্যবাদ! সফলভাবে যাচাই করা হয়েছে।", reply_markup=main_keyboard(uid))
+            await query.message.reply_text("✅ ধন্যবাদ! সফলভাবে যাচাই করা হয়েছে।", reply_markup=main_keyboard(uid))
         else:
-            await query.answer("❌ আপনি এখনো সব চ্যানেলে জয়েন করেননি!", show_alert=True)
+            await query.answer("❌ আপনি এখনো সব চ্যানেলে জয়েন করেননি!", show_alert=True)
         return
 
-    # ১. সার্ভিস সিলেক্ট করলে -> দেশের তালিকা (পতাকা সহ) দেখাবে
-    if data.startswith("sel_app_"):
-        app_name = data.replace("sel_app_", "")
-    
     # ১. সার্ভিস সিলেক্ট করলে -> দেশের তালিকা (পতাকা সহ) দেখাবে
     if data.startswith("sel_app_"):
         app_name = data.replace("sel_app_", "")
@@ -1227,21 +1461,24 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ No ranges available for this service.")
             return
 
-        # দেশের নাম ও পতাকা অনুযায়ী রেঞ্জগুলো ভাগ করা
-        country_map = {}
+        # দেশের নাম ও পতাকা অনুযায়ী রেঞ্জগুলো ভাগ করা
+        country_map_data = {}
         for rng in ranges:
             flag, cname = get_country_info(rng)
             c_key = f"{flag} {cname}"
-            if c_key not in country_map:
-                country_map[c_key] = []
-            country_map[c_key].append(rng)
+            if c_key not in country_map_data:
+                country_map_data[c_key] = []
+            country_map_data[c_key].append(rng)
 
         if "country_ranges" not in context.user_data:
             context.user_data["country_ranges"] = {}
 
+        # Save current app for change_country later
+        context.user_data["current_app"] = app_name
+
         buttons = []
         row = []
-        for c_label, rng_list in country_map.items():
+        for c_label, rng_list in country_map_data.items():
             c_idx = str(len(context.user_data["country_ranges"]) + 1)
             context.user_data["country_ranges"][c_idx] = {
                 "app": app_name,
@@ -1258,7 +1495,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"🌐 <b>Select Country for {app_name}:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
         return
 
-    # ২. দেশ সিলেক্ট করলে -> ওই দেশের নম্বর রিকোয়েস্ট করবে
+    # ২. দেশ সিলেক্ট করলে -> ওই দেশের নম্বর রিকোয়েস্ট করবে
     if data.startswith("sel_cty_"):
         c_idx = data.replace("sel_cty_", "")
         c_info = context.user_data.get("country_ranges", {}).get(c_idx)
@@ -1272,13 +1509,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         selected_range = random.choice(ranges)
         last_range[uid] = selected_range
+        context.user_data["current_app"] = app_name
 
         await query.edit_message_text(f"⏳ <b>Searching number for {app_name} ({country_label})...</b>", parse_mode="HTML")
         await request_queue.put({
             'uid': uid,
             'chat_id': query.message.chat_id,
             'context': context,
-            'range_text': selected_range
+            'range_text': selected_range,
+            'app_name': app_name
         })
         return
 
@@ -1302,22 +1541,94 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("<b>Select Service:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
         return
 
-    # ৪. নম্বর চেঞ্জ করা (Same Range)
+    # ৪. Change Country বাটন -> দেশের তালিকা দেখাবে (API থেকে)
+    if data == "change_country":
+        app_name = context.user_data.get("current_app", "")
+        top_ranges = context.user_data.get("top_ranges", {})
+        
+        # যদি top_ranges না থাকে, API থেকে নতুন করে আনবে
+        if not top_ranges:
+            top_ranges, err = await fetch_top_ranges()
+            if err or not top_ranges:
+                await query.answer("❌ Could not load services. Try again.", show_alert=True)
+                return
+            context.user_data["top_ranges"] = top_ranges
+
+        # যদি current app না থাকে, সার্ভিস সিলেক্ট করতে বলবে
+        if not app_name or app_name not in top_ranges:
+            # Show service selection
+            buttons = []
+            row = []
+            for a_name in top_ranges.keys():
+                icon = get_service_icon(a_name)
+                pct = get_service_percentage(a_name)
+                button_label = f"{icon} {a_name} ({pct})"
+                row.append(rbtn(button_label, style="primary", callback_data=f"sel_app_{a_name}"))
+                if len(row) == 2:
+                    buttons.append(row)
+                    row = []
+            if row: buttons.append(row)
+            await query.edit_message_text("<b>Select Service:</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))
+            return
+
+        ranges = top_ranges.get(app_name, [])
+        if not ranges:
+            await query.answer("❌ No ranges available.", show_alert=True)
+            return
+
+        # দেশের তালিকা তৈরি করবে
+        country_map_data = {}
+        for rng in ranges:
+            flag, cname = get_country_info(rng)
+            c_key = f"{flag} {cname}"
+            if c_key not in country_map_data:
+                country_map_data[c_key] = []
+            country_map_data[c_key].append(rng)
+
+        if "country_ranges" not in context.user_data:
+            context.user_data["country_ranges"] = {}
+
+        buttons = []
+        row = []
+        for c_label, rng_list in country_map_data.items():
+            c_idx = str(len(context.user_data["country_ranges"]) + 1)
+            context.user_data["country_ranges"][c_idx] = {
+                "app": app_name,
+                "label": c_label,
+                "ranges": rng_list
+            }
+            row.append(rbtn(c_label, style="primary", callback_data=f"sel_cty_{c_idx}"))
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+        if row: buttons.append(row)
+
+        buttons.append([rbtn("🔙 Back to Services", style="danger", callback_data="back_to_services")])
+        await query.edit_message_text(
+            f"🌍 <b>Change Country for {app_name}:</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+        return
+
+    # ৫. নম্বর চেঞ্জ করা (Same Range)
     if data == "same_range":
         r_text = last_range.get(uid)
         if r_text:
+            app_name = context.user_data.get("current_app", "Facebook")
             await query.edit_message_text("🔄 Requesting new number...")
             await request_queue.put({
                 'uid': uid,
                 'chat_id': query.message.chat_id,
                 'context': context,
-                'range_text': r_text
+                'range_text': r_text,
+                'app_name': app_name
             })
         else:
             await query.answer("No previous range found!", show_alert=True)
         return
 
-    # ৫. উইথড্র মেথড সিলেক্ট
+    # ৬. উইথড্র মেথড সিলেক্ট
     if data == "set_method":
         kb = InlineKeyboardMarkup([
             [rbtn("Bkash", style="primary", callback_data="m_Bkash"), rbtn("Nagad", style="primary", callback_data="m_Nagad")],
@@ -1352,7 +1663,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text(f"💵 <b>Enter Amount to Withdraw (Min: {settings['min_withdraw']}$):</b>", parse_mode="HTML", reply_markup=cancel_keyboard())
         return
 
-    # ৬. অ্যাডমিন উইথড্র অ্যাকশন
+    # ৭. অ্যাডমিন উইথড্র অ্যাকশন
     if data.startswith("adm_app_"):
         pid = data.replace("adm_app_", "")
         w_reqs = load_json(WITHDRAW_DATA_FILE, {})
