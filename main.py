@@ -53,7 +53,9 @@ DEFAULT_SETTINGS = {
     "force_join_enabled": False,
     "force_join_channels": ["@freeotpoffical"],
     "join_alert_enabled": True,
-    "auto_range": True
+    "auto_range": True,
+    "traffic_enabled": True,
+    "leaderboard_enabled": True
 }
 
 # ==================== DATA & SETTINGS ENGINE ====================
@@ -368,12 +370,26 @@ def rkbtn(text: str, style: str = None): return KeyboardButton(text=text, api_kw
 def rbtn(text: str, style: str = None, callback_data: str = None, url: str = None): return InlineKeyboardButton(**{k: v for k, v in [("text", text), ("callback_data", callback_data), ("url", url), ("api_kwargs", {"style": style} if style else None)] if v is not None})
 
 def main_keyboard(user_id):
+    settings = load_settings()
+    traffic_on = settings.get("traffic_enabled", True)
+    lb_on = settings.get("leaderboard_enabled", True)
+
     keyboard = [
         [rkbtn("GET NUMBER", style="danger")],
-        [rkbtn("TRAFFIC", style="primary"), rkbtn("LEADERBOARD", style="primary")],
-        [rkbtn("BALANCE", style="success"), rkbtn("REFER & EARN", style="success")],
-        [rkbtn("SUPPORT", style="primary")]
     ]
+
+    # Traffic ও Leaderboard — উভয়ই চালু থাকলে একসাথে, অন্যথায় যেটা চালু সেটা দেখাবে
+    mid_row = []
+    if traffic_on:
+        mid_row.append(rkbtn("TRAFFIC", style="primary"))
+    if lb_on:
+        mid_row.append(rkbtn("LEADERBOARD", style="primary"))
+    if mid_row:
+        keyboard.append(mid_row)
+
+    keyboard.append([rkbtn("BALANCE", style="success"), rkbtn("REFER & EARN", style="success")])
+    keyboard.append([rkbtn("SUPPORT", style="primary")])
+
     if is_admin(user_id):
         keyboard.append([rkbtn("ADMIN PANEL", style="primary")])
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -390,11 +406,19 @@ def admin_system_config_keyboard():
     settings = load_settings()
     live_on = settings.get("live_console_enabled", True)
     live_btn = "🟢 LIVE CONSOLE: ON" if live_on else "🔴 LIVE CONSOLE: OFF"
+
+    traffic_on = settings.get("traffic_enabled", True)
+    traffic_btn = "🟢 TRAFFIC: ON" if traffic_on else "🔴 TRAFFIC: OFF"
+
+    lb_on = settings.get("leaderboard_enabled", True)
+    lb_btn = "🟢 LEADERBOARD: ON" if lb_on else "🔴 LEADERBOARD: OFF"
+
     keyboard = [
         [KeyboardButton("🔑 SET API KEY"), KeyboardButton("🌐 SET API BASE URL")],
         [KeyboardButton("📢 SET OTP CHANNEL ID"), KeyboardButton("💰 SET WITHDRAW LIMITS")],
         [KeyboardButton("🎁 SET REFER BONUS"), KeyboardButton("⏱ SET COOLDOWN")],
         [KeyboardButton(live_btn)],
+        [KeyboardButton(traffic_btn), KeyboardButton(lb_btn)],
         [KeyboardButton("🚫 TOGGLE MAINTENANCE"), KeyboardButton("🔙 BACK TO ADMIN")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -443,50 +467,94 @@ last_request_time = {}
 seen_skipped = set()  # same number baar baar SKIP log না করার জন্য
 seen_group = set()    # group-এ already posted OTP track করার জন্য
 
+# ==================== API TYPE DETECTION ====================
+
+def is_new_api(base_url: str) -> bool:
+    """
+    base_url দেখে API type detect করে।
+    - নতুন (2oo9.cloud):  mauthapi header + /liveaccess, POST /getnum, /console, /success-otp
+    - পুরানো (legacy):    ?key=...&action=numbers, GET /getnumber, /console?api_key=, ?action=sms
+    """
+    if not base_url:
+        return False
+    markers = ["2oo9.cloud", "@public/api", "mauthapi"]
+    return any(m in base_url for m in markers)
+
 # ==================== API FUNCTIONS ====================
 
 async def fetch_top_ranges():
     settings = load_settings()
     api_key = settings.get("api_key")
     base_url = settings.get("base_url").rstrip('/')
-    
+
     try:
-        # ✅ সঠিক endpoint: ?key=...&action=numbers
-        url = f"{base_url}?key={api_key}&action=numbers"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept": "application/json"
-        }
-        r = await client_async.get(url, headers=headers, timeout=10.0)
-        
-        if r.status_code != 200:
-            return None, f"HTTP Status {r.status_code}: Server returned HTML Error"
-            
-        try:
-            data = r.json()
-        except Exception:
-            return None, f"HTML Page Received instead of JSON: {r.text[:100]}"
+        if is_new_api(base_url):
+            # ✅ নতুন API (2oo9.cloud): GET /liveaccess — mauthapi header
+            url = f"{base_url}/liveaccess"
+            headers = {
+                "mauthapi": api_key,
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0"
+            }
+            r = await client_async.get(url, headers=headers, timeout=10.0)
 
-        # API response: {"meta": {"code": 200, "status": "ok"}, "data": {...}}
-        # OR legacy: {"status": "success", "data": {...}}
-        meta = data.get("meta", {}) if isinstance(data, dict) else {}
-        top_status = data.get("status") if isinstance(data, dict) else None
-        meta_status = meta.get("status") if isinstance(meta, dict) else None
-        meta_code = meta.get("code") if isinstance(meta, dict) else None
+            if r.status_code != 200:
+                return None, f"HTTP {r.status_code}: Server error"
+            try:
+                data = r.json()
+            except Exception:
+                return None, f"JSON parse failed: {r.text[:100]}"
 
-        is_ok = (
-            top_status in ("success", "ok", True, 1) or
-            meta_status in ("success", "ok") or
-            meta_code == 200
-        )
-        if not is_ok and isinstance(data, dict) and "data" not in data and "services" not in data:
-            return None, f"API Error: {data}"
+            meta = data.get("meta", {}) if isinstance(data, dict) else {}
+            if meta.get("code") != 200:
+                return None, f"API Error: {data.get('message', data)}"
 
-        top_ranges = {}
-        services_list = []
+            top_ranges = {}
+            inner_data = data.get("data", {})
+            services_list = inner_data.get("services", []) if isinstance(inner_data, dict) else (inner_data if isinstance(inner_data, list) else [])
 
-        if isinstance(data, dict):
+            for s_item in services_list:
+                if isinstance(s_item, dict):
+                    app_raw = s_item.get("sid") or s_item.get("service") or s_item.get("app") or "Unknown"
+                    rng_list = s_item.get("ranges", [])
+                    app_name = app_raw.strip().title()
+                    top_ranges.setdefault(app_name, [])
+                    for rng in rng_list:
+                        if rng and rng not in top_ranges[app_name]:
+                            top_ranges[app_name].append(rng)
+
+            return top_ranges, None
+
+        else:
+            # ✅ পুরানো API (legacy): GET ?key=...&action=numbers
+            url = f"{base_url}?key={api_key}&action=numbers"
+            headers = {
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json"
+            }
+            r = await client_async.get(url, headers=headers, timeout=10.0)
+
+            if r.status_code != 200:
+                return None, f"HTTP {r.status_code}: Server error"
+            try:
+                data = r.json()
+            except Exception:
+                return None, f"HTML received instead of JSON: {r.text[:100]}"
+
+            meta = data.get("meta", {}) if isinstance(data, dict) else {}
+            top_status = data.get("status") if isinstance(data, dict) else None
+            is_ok = (
+                top_status in ("success", "ok", True, 1)
+                or meta.get("status") in ("success", "ok")
+                or meta.get("code") == 200
+            )
+            if not is_ok and "data" not in data and "services" not in data:
+                return None, f"API Error: {data}"
+
+            top_ranges = {}
             inner_data = data.get("data")
+            services_list = []
+
             if isinstance(inner_data, dict):
                 services_list = inner_data.get("services") or inner_data.get("ranges") or []
             elif isinstance(inner_data, list):
@@ -494,28 +562,26 @@ async def fetch_top_ranges():
             else:
                 services_list = data.get("services") or data.get("ranges") or []
 
-        if isinstance(services_list, list):
-            for s_item in services_list:
-                if isinstance(s_item, dict):
-                    app_raw = s_item.get("sid") or s_item.get("service") or s_item.get("app") or "Unknown"
-                    rng_list = s_item.get("ranges", [])
+            if isinstance(services_list, list):
+                for s_item in services_list:
+                    if isinstance(s_item, dict):
+                        app_raw = s_item.get("sid") or s_item.get("service") or s_item.get("app") or "Unknown"
+                        rng_list = s_item.get("ranges", [])
+                        app_name = app_raw.strip().title()
+                        top_ranges.setdefault(app_name, [])
+                        for rng in rng_list:
+                            if rng and rng not in top_ranges[app_name]:
+                                top_ranges[app_name].append(rng)
+            elif isinstance(services_list, dict):
+                for app_raw, rng_list in services_list.items():
                     app_name = app_raw.strip().title()
-                    if app_name not in top_ranges:
-                        top_ranges[app_name] = []
+                    top_ranges.setdefault(app_name, [])
                     for rng in rng_list:
                         if rng and rng not in top_ranges[app_name]:
                             top_ranges[app_name].append(rng)
-                            
-        elif isinstance(services_list, dict):
-            for app_raw, rng_list in services_list.items():
-                app_name = app_raw.strip().title()
-                if app_name not in top_ranges:
-                    top_ranges[app_name] = []
-                for rng in rng_list:
-                    if rng and rng not in top_ranges[app_name]:
-                        top_ranges[app_name].append(rng)
 
-        return top_ranges, None
+            return top_ranges, None
+
     except Exception as e:
         return None, str(e)
 
@@ -526,26 +592,55 @@ async def fetch_number_async(range_str):
         base_url = settings.get("base_url").rstrip('/')
         clean_rid = clean_range_id(range_str)
 
-        # ✅ সঠিক param: key= (আগে api_key= ছিল যা ভুল)
-        url = f"{base_url}/getnumber"
-        params = {
-            "key": api_key,
-            "rid": clean_rid,
-            "national": 1,
-            "remove_plus": 1
-        }
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        }
-        r = await client_async.get(url, params=params, headers=headers, timeout=10.0)
-        
-        try:
-            data = r.json()
-        except:
-            return None
-            
-        if isinstance(data, dict) and data.get("status") == "success":
-            return data.get("number") or data.get("phone")
+        if is_new_api(base_url):
+            # ✅ নতুন API (2oo9.cloud): POST /getnum — mauthapi header + JSON body
+            url = f"{base_url}/getnum"
+            headers = {
+                "mauthapi": api_key,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Mozilla/5.0"
+            }
+            payload = {"rid": clean_rid}
+            r = await client_async.post(url, json=payload, headers=headers, timeout=10.0)
+
+            try:
+                data = r.json()
+            except:
+                return None
+
+            # Envelope: { meta:{code,status}, data:{full_number, national_number, no_plus_number, ...} }
+            meta = data.get("meta", {}) if isinstance(data, dict) else {}
+            if meta.get("code") == 200:
+                num_data = data.get("data", {})
+                if isinstance(num_data, dict):
+                    return (
+                        num_data.get("no_plus_number")
+                        or num_data.get("national_number")
+                        or num_data.get("full_number", "").lstrip("+")
+                    )
+        else:
+            # ✅ পুরানো API (legacy): GET /getnumber?key=...&rid=...
+            url = f"{base_url}/getnumber"
+            params = {
+                "key": api_key,
+                "rid": clean_rid,
+                "national": 1,
+                "remove_plus": 1
+            }
+            headers = {
+                "User-Agent": "Mozilla/5.0"
+            }
+            r = await client_async.get(url, params=params, headers=headers, timeout=10.0)
+
+            try:
+                data = r.json()
+            except:
+                return None
+
+            if isinstance(data, dict) and data.get("status") == "success":
+                return data.get("number") or data.get("phone")
+
     except Exception as e:
         print(f"[DEBUG] Fetch number error: {e}")
     return None
@@ -570,10 +665,12 @@ async def worker():
 
             numbers = []
 
-            # 🔥 3 ta number fetch
+            # 🔥 3টা unique number fetch (new API: 1 allocation per call)
+            seen_nums = set()
             for i in range(3):
                 num = await fetch_number_async(range_text)
-                if num:
+                if num and num not in seen_nums:
+                    seen_nums.add(num)
                     numbers.append(num)
 
             # ❌ jodi number na pao
@@ -664,36 +761,85 @@ async def monitor_loop(app):
             except:
                 otp_target = str(otp_target_raw).strip()
 
+
             if api_key:
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                # ✅ PART 1: Live Console endpoint → সব OTP group-এ
-                # Browser DevTools-এ পাওয়া: /number/api/console
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                console_otps = []
-                try:
-                    rc = await client_async.get(
-                        f"{base_url}/console?api_key={api_key}", timeout=8.0
-                    )
-                    rc_data = rc.json()
-                    inner = rc_data.get("data", {})
-                    if isinstance(inner, dict):
-                        console_otps = inner.get("hits") or inner.get("otps") or []
-                    elif isinstance(inner, list):
-                        console_otps = inner
-                except Exception as ce:
-                    print(f"[CONSOLE ERROR] {ce}")
+                if is_new_api(base_url):
+                    # ✅ নতুন API (2oo9.cloud): mauthapi header
+                    api_headers = {
+                        "mauthapi": api_key,
+                        "Accept": "application/json",
+                        "User-Agent": "Mozilla/5.0"
+                    }
 
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                # ✅ PART 2: action=sms → user reward tracking
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                r = await client_async.get(f"{base_url}?key={api_key}&action=sms")
-                res = r.json()
+                    # ── PART 1: GET /console — Global live feed (last 15 min) ──
+                    console_otps = []
+                    try:
+                        rc = await client_async.get(
+                            f"{base_url}/console", headers=api_headers, timeout=8.0
+                        )
+                        rc_data = rc.json()
+                        inner = rc_data.get("data", {})
+                        if isinstance(inner, dict):
+                            console_otps = inner.get("hits") or inner.get("otps") or []
+                        elif isinstance(inner, list):
+                            console_otps = inner
+                    except Exception as ce:
+                        print(f"[CONSOLE ERROR] {ce}")
 
-                otps = []
-                if isinstance(res, dict) and res.get("status") in ("success", "ok", True, 1):
-                    otps = res.get("otps") or res.get("data") or []
-                elif isinstance(res, list):
-                    otps = res
+                    # ── PART 2: GET /success-otp — User-এর নিজের last 50 OTP ──
+                    otps = []
+                    try:
+                        rs = await client_async.get(
+                            f"{base_url}/success-otp", headers=api_headers, timeout=8.0
+                        )
+                        res = rs.json()
+                        s_meta = res.get("meta", {}) if isinstance(res, dict) else {}
+                        if s_meta.get("code") == 200:
+                            inner_s = res.get("data", {})
+                            if isinstance(inner_s, dict):
+                                otps = inner_s.get("otps") or []
+                            elif isinstance(inner_s, list):
+                                otps = inner_s
+                    except Exception as se:
+                        print(f"[SUCCESS-OTP ERROR] {se}")
+
+                else:
+                    # ✅ পুরানো API (legacy): query params দিয়ে
+                    legacy_headers = {
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept": "application/json"
+                    }
+
+                    # ── PART 1: GET /console?api_key=... ──
+                    console_otps = []
+                    try:
+                        rc = await client_async.get(
+                            f"{base_url}/console?api_key={api_key}",
+                            headers=legacy_headers, timeout=8.0
+                        )
+                        rc_data = rc.json()
+                        inner = rc_data.get("data", {})
+                        if isinstance(inner, dict):
+                            console_otps = inner.get("hits") or inner.get("otps") or []
+                        elif isinstance(inner, list):
+                            console_otps = inner
+                    except Exception as ce:
+                        print(f"[CONSOLE ERROR] {ce}")
+
+                    # ── PART 2: GET ?key=...&action=sms ──
+                    otps = []
+                    try:
+                        r = await client_async.get(
+                            f"{base_url}?key={api_key}&action=sms",
+                            headers=legacy_headers, timeout=8.0
+                        )
+                        res = r.json()
+                        if isinstance(res, dict) and res.get("status") in ("success", "ok", True, 1):
+                            otps = res.get("otps") or res.get("data") or []
+                        elif isinstance(res, list):
+                            otps = res
+                    except Exception as se:
+                        print(f"[SMS ERROR] {se}")
 
                 # console OTPs → group only (admin ON/OFF দিয়ে control)
                 live_console_enabled = settings.get("live_console_enabled", True)
@@ -1200,6 +1346,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "📊 TRAFFIC" or text == "TRAFFIC":
+        settings = load_settings()
+        if not settings.get("traffic_enabled", True):
+            await update.message.reply_text(
+                "🔴 <b>TRAFFIC feature is currently disabled.</b>\n<i>Contact admin for more info.</i>",
+                parse_mode="HTML"
+            )
+            return
+
         logs = load_json(ACTIVITY_LOGS_FILE, [])
         one_h_ago = datetime.now() - timedelta(hours=1)
         
@@ -1232,6 +1386,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "🏆 LEADERBOARD" or text == "LEADERBOARD":
+        settings = load_settings()
+        if not settings.get("leaderboard_enabled", True):
+            await update.message.reply_text(
+                "🔴 <b>LEADERBOARD feature is currently disabled.</b>\n<i>Contact admin for more info.</i>",
+                parse_mode="HTML"
+            )
+            return
+
         stats = load_json(STATS_FILE, {})
         users = load_json(USER_DATA_FILE, {})
         
@@ -1356,6 +1518,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"{icon} <b>Live Console Facebook OTP:</b> <b>{state_text}</b>\n\n"
             f"{'✅ এখন Facebook OTP group-এ আসবে।' if new_state else '⛔ Facebook OTP group-এ আসবে না।'}",
+            parse_mode="HTML",
+            reply_markup=admin_system_config_keyboard()
+        )
+        return
+
+    # ✅ Traffic ON/OFF toggle (শুধু Admin)
+    if ("TRAFFIC:" in text.upper()) and is_admin(uid):
+        settings = load_settings()
+        current = settings.get("traffic_enabled", True)
+        settings["traffic_enabled"] = not current
+        save_settings(settings)
+        new_state = settings["traffic_enabled"]
+        icon = "🟢" if new_state else "🔴"
+        state_text = "ON" if new_state else "OFF"
+        await update.message.reply_text(
+            f"{icon} <b>TRAFFIC Feature:</b> <b>{state_text}</b>\n\n"
+            f"{'✅ Users can now see Traffic.' if new_state else '⛔ Traffic is hidden from users.'}",
+            parse_mode="HTML",
+            reply_markup=admin_system_config_keyboard()
+        )
+        return
+
+    # ✅ Leaderboard ON/OFF toggle (শুধু Admin)
+    if ("LEADERBOARD:" in text.upper()) and is_admin(uid):
+        settings = load_settings()
+        current = settings.get("leaderboard_enabled", True)
+        settings["leaderboard_enabled"] = not current
+        save_settings(settings)
+        new_state = settings["leaderboard_enabled"]
+        icon = "🟢" if new_state else "🔴"
+        state_text = "ON" if new_state else "OFF"
+        await update.message.reply_text(
+            f"{icon} <b>LEADERBOARD Feature:</b> <b>{state_text}</b>\n\n"
+            f"{'✅ Users can now see Leaderboard.' if new_state else '⛔ Leaderboard is hidden from users.'}",
             parse_mode="HTML",
             reply_markup=admin_system_config_keyboard()
         )
