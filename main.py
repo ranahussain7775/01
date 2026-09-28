@@ -252,16 +252,32 @@ def get_country_info(number):
             return country_map[prefix]
     return "🌐", "Global"
 
+# ==================== ALLOWED SERVICES ====================
+# শুধু এই service গুলো GET NUMBER এ দেখাবে এবং OTP group/console এ যাবে
+ALLOWED_SERVICES = {
+    "facebook",
+    "whatsapp",
+    "instagram",
+    "discord",
+    "imo",
+    "tiktok"
+}
+
+def is_allowed_service(service_name: str) -> bool:
+    """service name ALLOWED_SERVICES এ আছে কিনা check করে (case-insensitive)"""
+    if not service_name: return False
+    name = service_name.lower().strip()
+    return any(allowed in name for allowed in ALLOWED_SERVICES)
+
 def detect_service(full_sms):
     if not full_sms: return "SMS SERVICE"
     sms_lower = full_sms.lower()
     if "facebook" in sms_lower or "fb" in sms_lower: return "FACEBOOK"
     if "instagram" in sms_lower or "insta" in sms_lower: return "INSTAGRAM"
     if "whatsapp" in sms_lower: return "WHATSAPP"
-    if "telegram" in sms_lower or "tg" in sms_lower: return "TELEGRAM"
     if "tiktok" in sms_lower: return "TIKTOK"
-    if "uber" in sms_lower: return "UBER"
     if "discord" in sms_lower: return "DISCORD"
+    if "imo" in sms_lower: return "IMO"
     return "SMS SERVICE"
 
 def clean_range_id(range_str: str) -> str:
@@ -373,12 +389,13 @@ def main_keyboard(user_id):
     settings = load_settings()
     traffic_on = settings.get("traffic_enabled", True)
     lb_on = settings.get("leaderboard_enabled", True)
+    live_on = settings.get("live_console_enabled", True)
 
     keyboard = [
         [rkbtn("GET NUMBER", style="danger")],
     ]
 
-    # Traffic ও Leaderboard — উভয়ই চালু থাকলে একসাথে, অন্যথায় যেটা চালু সেটা দেখাবে
+    # Traffic ও Leaderboard row
     mid_row = []
     if traffic_on:
         mid_row.append(rkbtn("TRAFFIC", style="primary"))
@@ -386,6 +403,10 @@ def main_keyboard(user_id):
         mid_row.append(rkbtn("LEADERBOARD", style="primary"))
     if mid_row:
         keyboard.append(mid_row)
+
+    # Live Console বাটন — আলাদা row
+    if live_on:
+        keyboard.append([rkbtn("LIVE CONSOLE", style="primary")])
 
     keyboard.append([rkbtn("BALANCE", style="success"), rkbtn("REFER & EARN", style="success")])
     keyboard.append([rkbtn("SUPPORT", style="primary")])
@@ -853,8 +874,8 @@ async def monitor_loop(app):
                         hit_time = str(hit.get("time", ""))
                         if not full_sms or not service: continue
 
-                        # ✅ শুধু Facebook OTP group-এ যাবে
-                        if "facebook" not in service.lower():
+                        # ✅ শুধু ALLOWED_SERVICES OTP group-এ যাবে
+                        if not is_allowed_service(service):
                             continue
 
                         otp_code = extract_otp(full_sms)
@@ -925,6 +946,13 @@ async def monitor_loop(app):
 
                         flag, c_name = get_country_info(num)
                         service = detect_service(full_sms)
+
+                        # ✅ শুধু ALLOWED_SERVICES process হবে
+                        if not is_allowed_service(service):
+                            if otp_id not in seen_skipped:
+                                seen_skipped.add(otp_id)
+                            continue
+
                         svc_icon = get_service_icon(service)
                         service_title = service.title()
                         masked_num = mask_number(num)
@@ -1291,11 +1319,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             err_msg = err if err else "No active services returned from API"
             await status.edit_text(f"❌ Could not fetch ranges from server.\n\n🔍 <b>Reason:</b> <code>{err_msg}</code>", parse_mode="HTML")
             return
-        
-        context.user_data["top_ranges"] = top_ranges
+
+        # ✅ শুধু ALLOWED_SERVICES দেখাবে
+        filtered_ranges = {
+            app: ranges
+            for app, ranges in top_ranges.items()
+            if is_allowed_service(app)
+        }
+
+        if not filtered_ranges:
+            await status.edit_text("❌ <b>No active services available right now.</b>\n<i>Try again later.</i>", parse_mode="HTML")
+            return
+
+        context.user_data["top_ranges"] = filtered_ranges
         buttons = []
         row = []
-        for app_name in top_ranges.keys():
+        for app_name in filtered_ranges.keys():
             icon = get_service_icon(app_name)
             pct = get_service_percentage(app_name)
             button_label = f"{icon} {app_name} ({pct})"
@@ -1344,6 +1383,76 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(ref_msg, parse_mode="HTML")
         return
+
+    if text == "📡 LIVE CONSOLE" or text == "LIVE CONSOLE":
+        settings = load_settings()
+        if not settings.get("live_console_enabled", True):
+            await update.message.reply_text(
+                "🔴 <b>LIVE CONSOLE is currently disabled.</b>\n<i>Contact admin for more info.</i>",
+                parse_mode="HTML"
+            )
+            return
+
+        api_key = settings.get("api_key")
+        base_url = settings.get("base_url", "").rstrip('/')
+
+        if not api_key:
+            await update.message.reply_text("❌ <b>API key not configured.</b>", parse_mode="HTML")
+            return
+
+        wait_msg = await update.message.reply_text("📡 <b>Fetching Live Console...</b>", parse_mode="HTML")
+
+        try:
+            if is_new_api(base_url):
+                headers = {"mauthapi": api_key, "Accept": "application/json", "User-Agent": "Mozilla/5.0"}
+                r = await client_async.get(f"{base_url}/console", headers=headers, timeout=8.0)
+            else:
+                r = await client_async.get(f"{base_url}/console?api_key={api_key}", timeout=8.0)
+
+            data = r.json()
+            inner = data.get("data", {})
+            hits = []
+            if isinstance(inner, dict):
+                hits = inner.get("hits") or inner.get("otps") or []
+            elif isinstance(inner, list):
+                hits = inner
+
+            if not hits:
+                await wait_msg.edit_text("📡 <b>Live Console</b>\n\n<i>No recent hits in the last 15 minutes.</i>", parse_mode="HTML")
+                return
+
+            lines = ["📡 <b>Live Console</b> • Last 15 Min\n━━━━━━━━━━━━━━━━━━━━━━━━\n"]
+            for hit in hits[:15]:  # max 15 দেখাবে
+                if not isinstance(hit, dict): continue
+                full_sms  = (hit.get("message") or "").strip()
+                service   = (hit.get("sid") or hit.get("service") or "Unknown").strip()
+                range_id  = (hit.get("range") or hit.get("number") or "").strip()
+
+                if not full_sms: continue
+
+                otp_code  = extract_otp(full_sms)
+                svc_icon  = get_service_icon(service)
+                flag, c_name = get_country_info(range_id.replace("X", ""))
+
+                otp_part = f"  🔑 <code>{otp_code}</code>" if otp_code and otp_code != "N/A" else ""
+                lines.append(
+                    f"{svc_icon} <b>{html.escape(service.title())}</b> • {flag} {c_name}\n"
+                    f"  📩 {html.escape(full_sms[:80])}{'…' if len(full_sms) > 80 else ''}"
+                    f"{otp_part}"
+                )
+                lines.append("─────────────────────")
+
+            channel_url = settings.get("channel_url", "")
+            kb = None
+            if channel_url:
+                kb = InlineKeyboardMarkup([[rbtn("📢 OTP Group", url=channel_url)]])
+
+            await wait_msg.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+        except Exception as e:
+            await wait_msg.edit_text(f"❌ <b>Error fetching console:</b> <code>{e}</code>", parse_mode="HTML")
+        return
+
 
     if text == "📊 TRAFFIC" or text == "TRAFFIC":
         settings = load_settings()
