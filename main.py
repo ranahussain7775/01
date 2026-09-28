@@ -395,30 +395,30 @@ def main_keyboard(user_id):
     live_on = settings.get("live_console_enabled", True)
 
     keyboard = [
-        [rkbtn("🔴 GET NUMBER", style="danger")],
+        [rkbtn("🔴 GET NUMBER", style="danger")],   # লাল — style="danger" কাজ করে
     ]
 
-    # Traffic ও Leaderboard row — নীল
+    # Traffic ও Leaderboard row — plain (primary style তে text দেখা যায় না)
     mid_row = []
     if traffic_on:
-        mid_row.append(rkbtn("📊 TRAFFIC", style="primary"))
+        mid_row.append(KeyboardButton("📊 TRAFFIC"))
     if lb_on:
-        mid_row.append(rkbtn("🏆 LEADERBOARD", style="primary"))
+        mid_row.append(KeyboardButton("🏆 LEADERBOARD"))
     if mid_row:
         keyboard.append(mid_row)
 
-    # Live Console — নীল, আলাদা row
+    # Live Console — plain
     if live_on:
-        keyboard.append([rkbtn("📡 LIVE CONSOLE", style="primary")])
+        keyboard.append([KeyboardButton("📡 LIVE CONSOLE")])
 
-    # Balance ও Refer — সবুজ
+    # Balance ও Refer — সবুজ (success style কাজ করে)
     keyboard.append([rkbtn("💵 BALANCE", style="success"), rkbtn("🎁 REFER & EARN", style="success")])
 
-    # Support — নীল
-    keyboard.append([rkbtn("💬 SUPPORT", style="primary")])
+    # Support — plain
+    keyboard.append([KeyboardButton("💬 SUPPORT")])
 
     if is_admin(user_id):
-        keyboard.append([rkbtn("⚙️ ADMIN PANEL", style="primary")])
+        keyboard.append([KeyboardButton("⚙️ ADMIN PANEL")])
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def admin_main_keyboard():
