@@ -260,7 +260,8 @@ ALLOWED_SERVICES = {
     "instagram",
     "discord",
     "imo",
-    "tiktok"
+    "tiktok",
+    "telegram"
 }
 
 def is_allowed_service(service_name: str) -> bool:
@@ -275,6 +276,7 @@ def detect_service(full_sms):
     if "facebook" in sms_lower or "fb" in sms_lower: return "FACEBOOK"
     if "instagram" in sms_lower or "insta" in sms_lower: return "INSTAGRAM"
     if "whatsapp" in sms_lower: return "WHATSAPP"
+    if "telegram" in sms_lower: return "TELEGRAM"
     if "tiktok" in sms_lower: return "TIKTOK"
     if "discord" in sms_lower: return "DISCORD"
     if "imo" in sms_lower: return "IMO"
@@ -344,10 +346,11 @@ def get_service_percentage(app_name):
     name = str(app_name).lower().strip()
     if "whatsapp" in name: return "95%"
     if "facebook" in name or "fb" in name: return "90%"
-    if "telegram" in name or "tg" in name: return "88%"
+    if "telegram" in name: return "88%"
+    if "instagram" in name or "insta" in name: return "90%"
     if "imo" in name: return "92%"
     if "discord" in name: return "85%"
-    if "uber" in name: return "90%"
+    if "tiktok" in name: return "90%"
     return "90%"
 
 # ==================== STATS & LOGS ENGINE ====================
@@ -392,27 +395,30 @@ def main_keyboard(user_id):
     live_on = settings.get("live_console_enabled", True)
 
     keyboard = [
-        [rkbtn("GET NUMBER", style="danger")],
+        [rkbtn("🔴 GET NUMBER", style="danger")],
     ]
 
-    # Traffic ও Leaderboard row
+    # Traffic ও Leaderboard row — নীল
     mid_row = []
     if traffic_on:
-        mid_row.append(rkbtn("TRAFFIC", style="primary"))
+        mid_row.append(rkbtn("📊 TRAFFIC", style="primary"))
     if lb_on:
-        mid_row.append(rkbtn("LEADERBOARD", style="primary"))
+        mid_row.append(rkbtn("🏆 LEADERBOARD", style="primary"))
     if mid_row:
         keyboard.append(mid_row)
 
-    # Live Console বাটন — আলাদা row
+    # Live Console — নীল, আলাদা row
     if live_on:
-        keyboard.append([rkbtn("LIVE CONSOLE", style="primary")])
+        keyboard.append([rkbtn("📡 LIVE CONSOLE", style="primary")])
 
-    keyboard.append([rkbtn("BALANCE", style="success"), rkbtn("REFER & EARN", style="success")])
-    keyboard.append([rkbtn("SUPPORT", style="primary")])
+    # Balance ও Refer — সবুজ
+    keyboard.append([rkbtn("💵 BALANCE", style="success"), rkbtn("🎁 REFER & EARN", style="success")])
+
+    # Support — নীল
+    keyboard.append([rkbtn("💬 SUPPORT", style="primary")])
 
     if is_admin(user_id):
-        keyboard.append([rkbtn("ADMIN PANEL", style="primary")])
+        keyboard.append([rkbtn("⚙️ ADMIN PANEL", style="primary")])
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def admin_main_keyboard():
@@ -677,10 +683,12 @@ async def worker():
             context = task['context']
             range_text = task['range_text']
             app_name = task.get('app_name', 'Facebook')
-            
+            del_msg_id  = task.get('delete_msg_id')
+            del_chat_id = task.get('delete_chat_id', chat_id)
+
             status_msg = await context.bot.send_message(
-                chat_id=chat_id, 
-                text="⏳ <b>SEARCHING NUMBER...</b>", 
+                chat_id=chat_id,
+                text="⏳ <b>SEARCHING NUMBER...</b>",
                 parse_mode="HTML"
             )
 
@@ -697,9 +705,12 @@ async def worker():
             # ❌ jodi number na pao
             if not numbers:
                 await status_msg.edit_text(
-                    "❌ <b>NO NUMBER FOUND. TRY AGAIN LATER.</b>", 
+                    "❌ <b>NO NUMBER FOUND. TRY AGAIN LATER.</b>",
                     parse_mode="HTML"
                 )
+                if del_msg_id:
+                    try: await context.bot.delete_message(chat_id=del_chat_id, message_id=del_msg_id)
+                    except: pass
                 continue
 
             buttons = []
@@ -757,6 +768,11 @@ async def worker():
                 parse_mode="HTML",
                 reply_markup=kb
             )
+
+            # ✅ Intermediate "Searching.../Requesting..." msg auto-delete
+            if del_msg_id:
+                try: await context.bot.delete_message(chat_id=del_chat_id, message_id=del_msg_id)
+                except: pass
 
         except Exception as e:
             print(f"Worker Exception: {e}")
@@ -831,36 +847,24 @@ async def monitor_loop(app):
                         "Accept": "application/json"
                     }
 
-                    # ── PART 1: GET /console?api_key=... ──
+                    # ── PART 1: GET ?key=...&action=sms — Free global OTP feed ──
+                    # (পুরানো API তে dedicated /console নেই, ?action=sms ই global feed)
                     console_otps = []
                     try:
                         rc = await client_async.get(
-                            f"{base_url}/console?api_key={api_key}",
-                            headers=legacy_headers, timeout=8.0
-                        )
-                        rc_data = rc.json()
-                        inner = rc_data.get("data", {})
-                        if isinstance(inner, dict):
-                            console_otps = inner.get("hits") or inner.get("otps") or []
-                        elif isinstance(inner, list):
-                            console_otps = inner
-                    except Exception as ce:
-                        print(f"[CONSOLE ERROR] {ce}")
-
-                    # ── PART 2: GET ?key=...&action=sms ──
-                    otps = []
-                    try:
-                        r = await client_async.get(
                             f"{base_url}?key={api_key}&action=sms",
                             headers=legacy_headers, timeout=8.0
                         )
-                        res = r.json()
-                        if isinstance(res, dict) and res.get("status") in ("success", "ok", True, 1):
-                            otps = res.get("otps") or res.get("data") or []
-                        elif isinstance(res, list):
-                            otps = res
-                    except Exception as se:
-                        print(f"[SMS ERROR] {se}")
+                        rc_data = rc.json()
+                        if isinstance(rc_data, dict) and rc_data.get("status") in ("success", "ok", True, 1):
+                            console_otps = rc_data.get("otps") or rc_data.get("data") or []
+                        elif isinstance(rc_data, list):
+                            console_otps = rc_data
+                    except Exception as ce:
+                        print(f"[CONSOLE ERROR] {ce}")
+
+                    # ── PART 2: same feed — number দিয়ে user match করে reward দেবে ──
+                    otps = console_otps  # same data, user match করবে নিচে
 
                 # console OTPs → group only (admin ON/OFF দিয়ে control)
                 live_console_enabled = settings.get("live_console_enabled", True)
@@ -868,10 +872,12 @@ async def monitor_loop(app):
                     channel_url = settings.get("channel_url", "")
                     for hit in console_otps:
                         if not isinstance(hit, dict): continue
-                        full_sms = (hit.get("message") or "").strip()
-                        service  = (hit.get("sid") or hit.get("service") or "").strip()
-                        range_id = (hit.get("range") or "").strip()
-                        hit_time = str(hit.get("time", ""))
+                        full_sms  = (hit.get("message") or "").strip()
+                        # new API: sid field | old API: service field
+                        service   = (hit.get("sid") or hit.get("service") or "").strip()
+                        # new API: range field | old API: number field
+                        range_id  = (hit.get("range") or hit.get("number") or "").strip()
+                        hit_time  = str(hit.get("time", ""))
                         if not full_sms or not service: continue
 
                         # ✅ শুধু ALLOWED_SERVICES OTP group-এ যাবে
@@ -881,17 +887,23 @@ async def monitor_loop(app):
                         otp_code = extract_otp(full_sms)
                         if not otp_code or otp_code == "N/A": continue
 
+                        # unique dedup key — range/number + otp + time
                         c_otp_id = f"console_{range_id}_{otp_code}_{hit_time}"
                         if c_otp_id in seen_group: continue
                         seen_group.add(c_otp_id)
 
                         svc_icon      = get_service_icon(service)
                         service_title = service.title()
-                        flag, c_name  = get_country_info(range_id.replace("X",""))
+                        # country: range এর XXX সরিয়ে বা number থেকে বের করো
+                        lookup_num    = range_id.replace("X", "").replace("x", "")
+                        flag, c_name  = get_country_info(lookup_num)
+
+                        # display label — range (22501XXX) বা masked number
+                        display_id = range_id if "X" in range_id.upper() else mask_number(range_id)
 
                         group_msg = (
-                            f"{svc_icon} <b>{service_title}</b> • 🌐 English\n"
-                            f"{flag} {c_name} • <code>{range_id}</code>\n\n"
+                            f"{svc_icon} <b>{service_title}</b> • {flag} {c_name}\n"
+                            f"📞 <code>{display_id}</code>\n\n"
                             f"🔔 {html.escape(full_sms)}"
                         )
                         group_kb_buttons = [
@@ -910,7 +922,6 @@ async def monitor_loop(app):
                                 otp_target, group_msg,
                                 parse_mode="HTML", reply_markup=kb
                             )
-                            # ✅ Terminal-এ [LIVE] log hide — শুধু error দেখাবে
                         except Exception as e:
                             print(f"[ERROR] Console→Group: {e}")
 
@@ -1312,7 +1323,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # --- USER BUTTON COMMANDS ---
-    if raw_text == "GET NUMBER" or raw_text == "📱 GET NUMBER":
+    if "GET NUMBER" in raw_text.upper():
         status = await update.message.reply_text("⏳ Loading Services...")
         top_ranges, err = await fetch_top_ranges()
         if err or not top_ranges:
@@ -1532,7 +1543,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # --- ADMIN MAIN MENU CATEGORIES ---
-    if text == "⚙️ ADMIN PANEL" or text == "ADMIN PANEL" and is_admin(uid):
+    if (text == "⚙️ ADMIN PANEL" or text == "ADMIN PANEL") and is_admin(uid):
         await update.message.reply_text("⚙️ <b>ADMIN CONTROL PANEL</b>", parse_mode="HTML", reply_markup=admin_main_keyboard())
         return
 
@@ -1822,7 +1833,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'chat_id': query.message.chat_id,
             'context': context,
             'range_text': selected_range,
-            'app_name': app_name
+            'app_name': app_name,
+            'delete_msg_id': query.message.message_id,
+            'delete_chat_id': query.message.chat_id
         })
         return
 
@@ -1927,7 +1940,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'chat_id': query.message.chat_id,
                 'context': context,
                 'range_text': r_text,
-                'app_name': app_name
+                'app_name': app_name,
+                'delete_msg_id': query.message.message_id,
+                'delete_chat_id': query.message.chat_id
             })
         else:
             await query.answer("No previous range found!", show_alert=True)
