@@ -1,3 +1,4 @@
+# ==================== BOT v2.0 - FULL FIXED ====================
 import asyncio
 import io
 import re
@@ -1174,7 +1175,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
 
     settings = load_settings()
-    text = settings.get("welcome_message") or "ðŸ‘‹ Welcome to AutoSyncX Bot!"
+    text = settings.get("welcome_message") or "ðŸ‘‹ Welcome to Free OTP Bot!"
 
     await update.message.reply_text(
         text,
