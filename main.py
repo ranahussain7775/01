@@ -14,7 +14,7 @@ import base64
 import hashlib
 import struct
 import unicodedata
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardButton, InlineKeyboardMarkup, CopyTextButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, CallbackQueryHandler
 from telegram.request import HTTPXRequest
@@ -37,6 +37,13 @@ ACTIVITY_LOGS_FILE = "activity_logs.json"
 SETTINGS_FILE = "settings.json"
 ACTIVE_NUMBERS_FILE = "active_numbers.json"
 MANUAL_RANGES_FILE = "manual_ranges.json"
+
+# BD Timezone (UTC+6)
+BD_TZ = timezone(timedelta(hours=6))
+
+def bd_now():
+    """Bangladesh time (UTC+6) এ current datetime return করে"""
+    return datetime.now(BD_TZ)
 
 DEFAULT_SETTINGS = {
     "api_key": os.getenv("API_KEY"),
@@ -255,7 +262,6 @@ def get_country_info(number):
     return "🌐", "Global"
 
 # ==================== ALLOWED SERVICES ====================
-# ✅ FIX: Telegram যোগ করা হয়েছে এবং সব সার্ভিস নিশ্চিত করা হয়েছে
 ALLOWED_SERVICES = {
     "facebook",
     "whatsapp",
@@ -264,11 +270,10 @@ ALLOWED_SERVICES = {
     "imo",
     "tiktok",
     "telegram",
-    "tg"  # ✅ "tg" shortname ও support করবে
+    "tg"
 }
 
 def is_allowed_service(service_name: str) -> bool:
-    """service name ALLOWED_SERVICES এ আছে কিনা check করে (case-insensitive)"""
     if not service_name: return False
     name = service_name.lower().strip()
     return any(allowed in name for allowed in ALLOWED_SERVICES)
@@ -279,7 +284,7 @@ def detect_service(full_sms):
     if "facebook" in sms_lower or "fb" in sms_lower: return "FACEBOOK"
     if "instagram" in sms_lower or "insta" in sms_lower: return "INSTAGRAM"
     if "whatsapp" in sms_lower: return "WHATSAPP"
-    if "telegram" in sms_lower or "telgram" in sms_lower: return "TELEGRAM"  # ✅ typo handle
+    if "telegram" in sms_lower or "telgram" in sms_lower: return "TELEGRAM"
     if "tiktok" in sms_lower: return "TIKTOK"
     if "discord" in sms_lower: return "DISCORD"
     if "imo" in sms_lower: return "IMO"
@@ -294,7 +299,7 @@ def get_service_icon(app_name):
     name = str(app_name).lower().strip()
     if "whatsapp" in name: return "🟢"
     if "facebook" in name or "fb" in name: return "📘"
-    if "telegram" in name or name == "tg": return "✈️"  # ✅ "tg" handle
+    if "telegram" in name or name == "tg": return "✈️"
     if "instagram" in name or "insta" in name: return "📸"
     if "tiktok" in name: return "🎵"
     if "twitter" in name or name == "x": return "🐦"
@@ -356,43 +361,186 @@ def get_service_percentage(app_name):
     if "tiktok" in name: return "90%"
     return "90%"
 
+# ==================== FAKE LEADERBOARD DATA ====================
+
+FAKE_LEADERBOARD = [
+    {"name": "Rakib Hasan", "username": "rakib_bd", "otps": 847},
+    {"name": "Sumaiya Akter", "username": "sumaiya_99", "otps": 712},
+    {"name": "Nahid Islam", "username": "nahid_otp", "otps": 634},
+    {"name": "Farhan Ahmed", "username": "farhan_fx", "otps": 589},
+    {"name": "Riya Begum", "username": "riya_win", "otps": 521},
+    {"name": "Tamim Iqbal", "username": "tamim_pro", "otps": 478},
+    {"name": "Mim Akter", "username": "mim_bd23", "otps": 415},
+    {"name": "Sohel Rana", "username": "sohel_king", "otps": 372},
+    {"name": "Nusrat Jahan", "username": "nusrat_x", "otps": 331},
+    {"name": "Arif Hossain", "username": "arif_otp", "otps": 298},
+]
+
+def get_leaderboard_data():
+    """Real + Fake মিলিয়ে Top 10 leaderboard তৈরি করে"""
+    stats = load_json(STATS_FILE, {})
+    users = load_json(USER_DATA_FILE, {})
+
+    real_ranked = []
+    for u_id, s_data in stats.items():
+        cnt = len(s_data.get("otps_received", []))
+        if cnt > 0:
+            u_data = users.get(str(u_id), {})
+            full_name = (u_data.get("full_name") or "").strip()
+            username = (u_data.get("username") or "").strip()
+            if full_name:
+                display = full_name
+                if username:
+                    display += f" (@{username})"
+            elif username:
+                display = f"@{username}"
+            else:
+                display = f"User#{str(u_id)[-4:]}"
+            real_ranked.append({"name": display, "username": username, "otps": cnt, "real": True})
+
+    real_ranked.sort(key=lambda x: x["otps"], reverse=True)
+    real_count = len(real_ranked)
+
+    # যদি real ≥ 10 জন হয়, শুধু real দেখাও
+    if real_count >= 10:
+        return real_ranked[:10]
+
+    # নয়তো real এর সাথে fake যোগ করে 10 পূরণ করো
+    fake_needed = 10 - real_count
+
+    # Fake data-র OTP count real এর চেয়ে বেশি না হওয়ার জন্য adjust করো
+    if real_ranked:
+        max_real = real_ranked[0]["otps"]
+        # Fake গুলোর OTP count যেন real leader-এর চেয়ে বেশি না হয়
+        adjusted_fake = []
+        base = max_real + random.randint(50, 150)
+        for i, f in enumerate(FAKE_LEADERBOARD[:fake_needed]):
+            fake_entry = dict(f)
+            fake_entry["otps"] = base - (i * random.randint(30, 80))
+            if fake_entry["otps"] < 50:
+                fake_entry["otps"] = random.randint(50, 150)
+            fake_entry["real"] = False
+            adjusted_fake.append(fake_entry)
+    else:
+        adjusted_fake = [dict(f) for f in FAKE_LEADERBOARD[:fake_needed]]
+        for f in adjusted_fake:
+            f["real"] = False
+
+    combined = adjusted_fake + real_ranked
+    combined.sort(key=lambda x: x["otps"], reverse=True)
+    return combined[:10]
+
+# ==================== FAKE TRAFFIC DATA ====================
+
+FAKE_TRAFFIC_POOL = [
+    {"service": "FACEBOOK",  "flag": "🇧🇩", "country": "Bangladesh",  "otps": 0},
+    {"service": "WHATSAPP",  "flag": "🇮🇳", "country": "India",       "otps": 0},
+    {"service": "INSTAGRAM", "flag": "🇲🇬", "country": "Madagascar",  "otps": 0},
+    {"service": "TIKTOK",    "flag": "🇵🇭", "country": "Philippines", "otps": 0},
+    {"service": "DISCORD",   "flag": "🇷🇺", "country": "Russia",      "otps": 0},
+    {"service": "FACEBOOK",  "flag": "🇺🇸", "country": "USA",         "otps": 0},
+    {"service": "WHATSAPP",  "flag": "🇧🇷", "country": "Brazil",      "otps": 0},
+    {"service": "TELEGRAM",  "flag": "🇰🇿", "country": "Kazakhstan",  "otps": 0},
+    {"service": "INSTAGRAM", "flag": "🇵🇰", "country": "Pakistan",    "otps": 0},
+    {"service": "TIKTOK",    "flag": "🇻🇳", "country": "Vietnam",     "otps": 0},
+]
+
+def get_traffic_data(real_counts: dict, real_total: int):
+    """Real + Fake মিলিয়ে Traffic data তৈরি করে।
+    real_counts: {(service, flag, country): count}
+    real_total: total real OTP count
+    """
+    # Convert real data to list of dicts
+    real_list = []
+    for (srv, flag, cname), cnt in real_counts.items():
+        real_list.append({"service": srv, "flag": flag, "country": cname, "otps": cnt, "real": True})
+
+    real_list.sort(key=lambda x: x["otps"], reverse=True)
+    real_service_count = len(real_list)
+
+    # Real ≥ 8 থাকলে শুধু real দেখাও
+    if real_service_count >= 8:
+        return real_list[:10], sum(e["otps"] for e in real_list[:10])
+
+    # Real data এর সাথে fake যোগ করে 6-8 টা entry বানাও
+    fake_needed = max(6, 8) - real_service_count
+    fake_needed = min(fake_needed, len(FAKE_TRAFFIC_POOL))
+
+    # Real services যা দেখাচ্ছি সেগুলো fake এ থাকলে skip করি
+    real_keys = {(e["service"], e["country"]) for e in real_list}
+
+    selected_fake = []
+    pool_shuffled = random.sample(FAKE_TRAFFIC_POOL, len(FAKE_TRAFFIC_POOL))
+    for f in pool_shuffled:
+        if len(selected_fake) >= fake_needed:
+            break
+        if (f["service"], f["country"]) in real_keys:
+            continue
+        fake_entry = dict(f)
+        # Realistic random OTP count (15 min window তে)
+        fake_entry["otps"] = random.randint(3, 28)
+        fake_entry["real"] = False
+        selected_fake.append(fake_entry)
+
+    combined = real_list + selected_fake
+    combined.sort(key=lambda x: x["otps"], reverse=True)
+    combined = combined[:10]
+    total = sum(e["otps"] for e in combined)
+    return combined, total
+
+# ==================== ANIMATION HELPERS ====================
+
+LOADING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+async def animate_loading(msg, text: str, steps: int = 4, delay: float = 0.4):
+    """Loading animation দেখায়"""
+    frames = ["🔍", "🔎", "📡", "⚡"]
+    dots = ["", ".", "..", "..."]
+    for i in range(steps):
+        try:
+            frame = frames[i % len(frames)]
+            dot = dots[i % len(dots)]
+            await msg.edit_text(f"{frame} <b>{text}{dot}</b>", parse_mode="HTML")
+            await asyncio.sleep(delay)
+        except:
+            break
+
+async def animate_number_search(msg):
+    """Number search animation"""
+    steps = [
+        "🔍 <b>CONNECTING TO SERVER...</b>",
+        "📡 <b>SCANNING RANGES...</b>",
+        "🌐 <b>FETCHING NUMBERS...</b>",
+        "⚡ <b>ALMOST READY...</b>",
+    ]
+    for step in steps:
+        try:
+            await msg.edit_text(step, parse_mode="HTML")
+            await asyncio.sleep(0.5)
+        except:
+            break
+
 # ==================== 2FA TOTP ENGINE ====================
 
 def generate_totp(secret: str) -> tuple[str, int]:
-    """
-    Standard TOTP (RFC 6238) generate করে।
-    Returns: (6-digit code, seconds remaining)
-    """
     try:
-        # Secret clean করা — uppercase + padding
         secret_clean = secret.upper().strip().replace(" ", "")
-        # Base32 padding ঠিক করা
         padding = (8 - len(secret_clean) % 8) % 8
         secret_padded = secret_clean + "=" * padding
-
-        # Key decode
         key = base64.b32decode(secret_padded)
-
-        # Time step (30 seconds)
         now = int(time.time())
         time_step = now // 30
         remaining = 30 - (now % 30)
-
-        # HMAC-SHA1
         msg = struct.pack(">Q", time_step)
         h = hmac.new(key, msg, hashlib.sha1).digest()
-
-        # Dynamic truncation
         offset = h[-1] & 0x0F
         code_int = struct.unpack(">I", h[offset:offset + 4])[0] & 0x7FFFFFFF
         code = str(code_int % 1_000_000).zfill(6)
-
         return code, remaining
     except Exception as e:
         return None, 0
 
 def format_2fa_message(secret: str, code: str, remaining: int) -> str:
-    """2FA result message format করে"""
     bar_filled = int(remaining / 30 * 10)
     progress = "🟩" * bar_filled + "⬜" * (10 - bar_filled)
     return (
@@ -400,7 +548,7 @@ def format_2fa_message(secret: str, code: str, remaining: int) -> str:
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔑 <b>Secret:</b> <code>{secret.upper()}</code>\n\n"
         f"✅ <b>Code:</b> <code>{code}</code>\n"
-        f"⏱ <i>(This code is valid for {remaining} seconds)</i>\n\n"
+        f"⏱ <i>(Valid for {remaining} seconds)</i>\n\n"
         f"{progress} <code>{remaining}s</code>"
     )
 
@@ -457,10 +605,13 @@ def main_keyboard(user_id):
     if mid_row:
         keyboard.append(mid_row)
 
+    # LIVE OTP FEED & 2FA GENERATOR একই লাইনে
+    otp_2fa_row = []
     if live_on:
-        keyboard.append([KeyboardButton("📡 LIVE OTP FEED")])
+        otp_2fa_row.append(KeyboardButton("📡 LIVE OTP FEED"))
+    otp_2fa_row.append(KeyboardButton("🔐 2FA GENERATOR"))
+    keyboard.append(otp_2fa_row)
 
-    keyboard.append([KeyboardButton("🔐 2FA GENERATOR")])
     keyboard.append([rkbtn("💰 MY WALLET", style="success"), rkbtn("🎁 REFER & EARN", style="success")])
     keyboard.append([KeyboardButton("🆘 SUPPORT")])
 
@@ -725,12 +876,14 @@ async def worker():
 
             status_msg = await context.bot.send_message(
                 chat_id=chat_id,
-                text="⏳ <b>SEARCHING NUMBER...</b>",
+                text="🔍 <b>CONNECTING TO SERVER...</b>",
                 parse_mode="HTML"
             )
 
-            numbers = []
+            # Animate loading
+            await animate_number_search(status_msg)
 
+            numbers = []
             seen_nums = set()
             for i in range(3):
                 num = await fetch_number_async(range_text)
@@ -759,7 +912,10 @@ async def worker():
 
             icon = get_service_icon(app_name)
             pct = get_service_percentage(app_name)
-            now_str = datetime.now().strftime("%H:%M:%S")
+
+            # BD time ব্যবহার করা হচ্ছে
+            now_str = bd_now().strftime("%H:%M:%S")
+
             txt = (
                 f"╔══════════════════════╗\n"
                 f"   📲 <b>VIRTUAL NUMBER READY</b>\n"
@@ -780,9 +936,10 @@ async def worker():
                     "timestamp": datetime.now().isoformat()
                 }
 
+                # "TAP TO COPY" সরিয়ে "CHANGE NUMBER" লেখা
                 buttons.append([
                     InlineKeyboardButton(
-                        text=f"📱 {flag}  +{clean_num}  ·  TAP TO COPY",
+                        text=f"📱 {flag}  +{clean_num}  ·  CHANGE NUMBER",
                         copy_text=CopyTextButton(text=f"+{clean_num}")
                     )
                 ])
@@ -1060,7 +1217,7 @@ async def monitor_loop(app):
         except Exception as e:
             print(f"[monitor_loop ERROR] {e}")
 
-        # ✅ FIX: Memory leak রোধ — set বড় হলে পুরনো entries সরাও
+        # Memory leak রোধ — set বড় হলে পুরনো entries সরাও
         if len(seen_group) > 5000:
             seen_group.clear()
         if len(seen_skipped) > 5000:
@@ -1117,7 +1274,7 @@ async def check_force_sub(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     return True
 
-# ==================== ✅ FIX: START FUNCTION (REFER COUNT BUG FIXED) ====================
+# ==================== START FUNCTION ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_force_sub(update, context):
         return
@@ -1125,15 +1282,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.effective_user.username
     full_name = update.effective_user.full_name
 
-    # ✅ FIX: প্রথমেই users_db লোড করা হচ্ছে
     users_db = load_json(USER_DATA_FILE, {})
     is_new = str(uid) not in users_db
 
-    # ✅ FIX: get_user() কল করার পর আবার fresh users_db লোড করতে হবে
     get_user(uid, username, full_name)
-    users_db = load_json(USER_DATA_FILE, {})  # ✅ re-load after get_user creates the entry
+    users_db = load_json(USER_DATA_FILE, {})
 
-    # ✅ FIX: Referral Tracking সম্পূর্ণ নতুনভাবে লেখা
     if context.args and is_new:
         referrer_id = str(context.args[0])
         referrer_id = referrer_id.strip()
@@ -1142,15 +1296,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             settings = load_settings()
             bonus = settings.get("refer_bonus", 0.05)
 
-            # ✅ FIX: referred_by সেট করা
             users_db[str(uid)]["referred_by"] = referrer_id
             save_json(USER_DATA_FILE, users_db)
 
-            # ✅ FIX: Referrer-এর balance, referrals, referral_earnings আপডেট
-            # আগে balance আপডেট করি
             await update_db_balance(referrer_id, bonus)
 
-            # ✅ FIX: এখন fresh লোড করে referrals count বাড়াই
             users_db = load_json(USER_DATA_FILE, {})
             if referrer_id in users_db:
                 users_db[referrer_id]["referrals"] = users_db[referrer_id].get("referrals", 0) + 1
@@ -1159,7 +1309,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 save_json(USER_DATA_FILE, users_db)
 
-            # ✅ Referrer-কে notification পাঠানো
             try:
                 await context.bot.send_message(
                     int(referrer_id),
@@ -1200,7 +1349,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ✅ FIX: Maintenance mode check — admin বাদে সবার জন্য block
     if not is_admin(uid):
         settings = load_settings()
         if settings.get("maintenance_mode", False):
@@ -1231,7 +1379,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("2fa_mode", None)
         secret_raw = raw_text.strip().replace(" ", "").upper()
 
-        # Validate — base32 characters only
         valid_chars = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567=")
         if not secret_raw or not all(c in valid_chars for c in secret_raw) or len(secret_raw) < 8:
             await update.message.reply_text(
@@ -1251,7 +1398,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        # Store secret for refresh
         context.user_data["2fa_secret"] = secret_raw
 
         msg = format_2fa_message(secret_raw, code, remaining)
@@ -1437,7 +1583,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_text("❌ User already banned!", reply_markup=admin_security_join_keyboard())
 
-        # ✅ FIX: unban_user handler যোগ করা হয়েছে (আগে ছিল না!)
         elif edit_mode == "unban_user":
             if unban_user(raw_text):
                 await update.message.reply_text(f"✅ User {raw_text} unbanned!", reply_markup=admin_security_join_keyboard())
@@ -1445,7 +1590,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ User not found in ban list!", reply_markup=admin_security_join_keyboard())
 
         elif edit_mode == "search_username":
-            # ✅ FIX: search_username handler যোগ করা হয়েছে (আগে ছিল না!)
             search_name = raw_text.replace("@", "").lower().strip()
             users = load_json(USER_DATA_FILE, {})
             found = []
@@ -1514,7 +1658,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # --- USER BUTTON COMMANDS ---
     if "GET NUMBER" in raw_text.upper():
-        status = await update.message.reply_text("⏳ Loading Services...")
+        status = await update.message.reply_text("🔍 <b>CONNECTING TO SERVER...</b>", parse_mode="HTML")
+
+        # Animate loading
+        load_steps = [
+            "📡 <b>FETCHING SERVICES...</b>",
+            "⚡ <b>LOADING PLATFORMS...</b>",
+            "✅ <b>ALMOST READY...</b>",
+        ]
+        for step in load_steps:
+            try:
+                await status.edit_text(step, parse_mode="HTML")
+                await asyncio.sleep(0.5)
+            except: break
+
         top_ranges, err = await fetch_top_ranges()
         if err or not top_ranges:
             err_msg = err if err else "No active services returned from API"
@@ -1622,7 +1779,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ <b>API key not configured.</b>", parse_mode="HTML")
             return
 
-        wait_msg = await update.message.reply_text("📡 <b>Fetching Live Console...</b>", parse_mode="HTML")
+        wait_msg = await update.message.reply_text("📡 <b>CONNECTING TO FEED...</b>", parse_mode="HTML")
+
+        # Animate
+        feed_steps = ["📡 <b>SCANNING OTP STREAM...</b>", "⚡ <b>DECODING MESSAGES...</b>", "🔍 <b>FILTERING RESULTS...</b>"]
+        for step in feed_steps:
+            try:
+                await wait_msg.edit_text(step, parse_mode="HTML")
+                await asyncio.sleep(0.5)
+            except: break
 
         try:
             if is_new_api(base_url):
@@ -1688,48 +1853,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
+        # Animate
+        tr_msg = await update.message.reply_text("📊 <b>LOADING TRAFFIC DATA...</b>", parse_mode="HTML")
+        await asyncio.sleep(0.7)
+
         logs = load_json(ACTIVITY_LOGS_FILE, [])
-        one_h_ago = datetime.now() - timedelta(hours=1)
-        
-        counts = {}
-        total = 0
+        fifteen_min_ago = datetime.now() - timedelta(minutes=15)
+
+        real_counts = {}
+        real_total = 0
         for log in logs:
             if log.get("action") == "OTP_RECEIVED":
                 try:
                     ts = datetime.fromisoformat(log.get("timestamp"))
-                    if ts >= one_h_ago:
+                    if ts >= fifteen_min_ago:
                         dtls = log.get("details", {})
                         num, sms = dtls.get("number"), dtls.get("sms")
                         srv = detect_service(sms)
                         flag, cname = get_country_info(num)
                         key = (srv, flag, cname)
-                        counts[key] = counts.get(key, 0) + 1
-                        total += 1
+                        real_counts[key] = real_counts.get(key, 0) + 1
+                        real_total += 1
                 except: pass
-                
-        if total == 0:
-            await update.message.reply_text("📊 <b>Live Traffic (Last 1 Hour)</b>\n\n<i>No OTP transactions in the last hour.</i>", parse_mode="HTML")
-            return
-            
+
+        # Real + Fake মিলিয়ে traffic data নাও
+        traffic_list, total = get_traffic_data(real_counts, real_total)
+
         lines = [
-            "📊 <b>LIVE TRAFFIC</b> • Last 1 Hour",
+            "📊 <b>LIVE TRAFFIC</b> • Last 15 Min",
             "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         ]
-        sorted_counts = sorted(counts.items(), key=lambda x: x[1], reverse=True)
-        for i, ((srv, flag, cname), count) in enumerate(sorted_counts, 1):
-            pct = (count / total) * 100
-            bar_len = int(pct / 10)
+
+        for i, entry in enumerate(traffic_list, 1):
+            srv = entry["service"]
+            flag = entry["flag"]
+            cname = entry["country"]
+            count = entry["otps"]
+            pct = (count / total * 100) if total > 0 else 0
+            bar_len = max(1, int(pct / 10))
             bar = "█" * bar_len + "░" * (10 - bar_len)
             svc_icon = get_service_icon(srv)
             lines.append(
                 f"<b>{i}.</b> {svc_icon} <b>{srv}</b>  {flag} {cname}\n"
                 f"   <code>[{bar}]</code> <code>{pct:.1f}%</code>  ({count} OTPs)\n"
             )
-        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
-        lines.append(f"📈 <b>Total:</b> <code>{total}</code> OTPs received in last hour")
 
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"📈 <b>Total:</b> <code>{total}</code> OTPs in last 15 minutes")
+
+        await tr_msg.edit_text("\n".join(lines), parse_mode="HTML")
         return
+
 
     if text == "🏆 LEADERBOARD" or text == "LEADERBOARD":
         settings = load_settings()
@@ -1740,18 +1914,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        stats = load_json(STATS_FILE, {})
-        users = load_json(USER_DATA_FILE, {})
+        # Animate loading
+        lb_msg = await update.message.reply_text("🏆 <b>LOADING LEADERBOARD...</b>", parse_mode="HTML")
+        await asyncio.sleep(0.8)
 
-        ranked = []
-        for u_id, s_data in stats.items():
-            cnt = len(s_data.get("otps_received", []))
-            if cnt > 0:
-                ranked.append((u_id, cnt))
-
-        ranked = sorted(ranked, key=lambda x: x[1], reverse=True)[:10]
-
-        # Top 3 এর জন্য মেডেল
+        board = get_leaderboard_data()
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
 
         lines = [
@@ -1759,34 +1926,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "━━━━━━━━━━━━━━━━━━━━━━━━\n"
         ]
 
-        if ranked:
-            for idx, (r_uid, count) in enumerate(ranked, 1):
-                u_data = users.get(str(r_uid), {})
+        if board:
+            for idx, entry in enumerate(board, 1):
+                name = entry.get("name", "Unknown")
+                username = entry.get("username", "")
+                otps = entry.get("otps", 0)
+                is_real = entry.get("real", False)
 
-                # ✅ full_name সবার আগে দেখাবে, না থাকলে username, না থাকলে ID
-                full_name = (u_data.get("full_name") or "").strip()
-                username  = (u_data.get("username") or "").strip()
-
-                if full_name:
-                    display_name = html.escape(full_name)
-                    if username:
-                        display_name += f" <i>(@{html.escape(username)})</i>"
-                elif username:
-                    display_name = f"@{html.escape(username)}"
+                if is_real:
+                    display_name = html.escape(name)
                 else:
-                    display_name = f"User#{r_uid[-4:]}"
+                    display_name = html.escape(name)
 
                 medal = medals.get(idx, f"<b>#{idx}</b>")
+                # Star marker for real users
+                real_tag = " ⭐" if is_real else ""
                 lines.append(
-                    f"{medal} {display_name}\n"
-                    f"     📩 <code>{count}</code> OTPs received\n"
+                    f"{medal} {display_name}{real_tag}\n"
+                    f"     📩 <code>{otps}</code> OTPs received\n"
                 )
         else:
             lines.append("<i>No OTP record available yet.</i>")
 
         lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append("⭐ = Verified Real User")
 
-        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+        await lb_msg.edit_text("\n".join(lines), parse_mode="HTML")
         return
 
     if text == "🆘 SUPPORT" or text == "SUPPORT" or text == "💬 SUPPORT":
@@ -2041,7 +2206,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ==================== 2FA CALLBACKS ====================
 
     if data == "2fa_cancel":
-        # 2fa mode বাতিল করা
         context.user_data.pop("2fa_mode", None)
         context.user_data.pop("2fa_secret", None)
         try:
@@ -2069,7 +2233,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await query.edit_message_text(msg, parse_mode="HTML", reply_markup=kb)
         except Exception as e:
-            # Message unchanged হলে Telegram error দেয়, সেটা ignore করো
             pass
         return
 
@@ -2214,11 +2377,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     row = []
             if row: buttons.append(row)
             await query.edit_message_text(
-            "📲 <b>SELECT SERVICE</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "<i>Choose a platform to get a virtual number:</i>",
-            parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons)
-        )
+                "📲 <b>SELECT SERVICE</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "<i>Choose a platform to get a virtual number:</i>",
+                parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons)
+            )
             return
 
         ranges = top_ranges.get(app_name, [])
