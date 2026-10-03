@@ -920,7 +920,7 @@ async def worker():
             pct = get_service_percentage(app_name)
 
             # BD time ব্যবহার করা হচ্ছে
-            now_str = bd_now().strftime("%H:%M:%S")
+            now_str = bd_now().strftime("%I:%M:%S %p")
 
             txt = (
                 f"╔══════════════════════╗\n"
@@ -945,7 +945,7 @@ async def worker():
                 # "TAP TO COPY" সরিয়ে "CHANGE NUMBER" লেখা
                 buttons.append([
                     InlineKeyboardButton(
-                        text=f"📱 {flag}  +{clean_num}  ·  CHANGE NUMBER",
+                        text=f"📱 {flag}  +{clean_num}",
                         copy_text=CopyTextButton(text=f"+{clean_num}")
                     )
                 ])
@@ -957,7 +957,7 @@ async def worker():
 
             buttons.append([
                 rbtn("🌍 Change Country", style="primary", callback_data="change_country"),
-                rbtn("🔄 New Number", style="primary", callback_data="same_range")
+                rbtn("🔄 CHANGE NUMBER", style="primary", callback_data="same_range")
             ])
 
             buttons.append([
