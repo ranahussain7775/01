@@ -65,7 +65,8 @@ DEFAULT_SETTINGS = {
     "join_alert_enabled": True,
     "auto_range": True,
     "traffic_enabled": True,
-    "leaderboard_enabled": True
+    "leaderboard_enabled": True,
+    "live_console_enabled": True    # ✅ FIX: DEFAULT_SETTINGS এ যোগ করা হয়েছে
 }
 
 # ==================== DATA & SETTINGS ENGINE ====================
@@ -705,7 +706,10 @@ def is_new_api(base_url: str) -> bool:
 async def fetch_top_ranges():
     settings = load_settings()
     api_key = settings.get("api_key")
-    base_url = settings.get("base_url").rstrip('/')
+    base_url = (settings.get("base_url") or "").rstrip('/')
+
+    if not api_key or not base_url:
+        return None, "API key or Base URL not configured."
 
     try:
         if is_new_api(base_url):
@@ -807,7 +811,9 @@ async def fetch_number_async(range_str):
     try:
         settings = load_settings()
         api_key = settings.get("api_key")
-        base_url = settings.get("base_url").rstrip('/')
+        base_url = (settings.get("base_url") or "").rstrip('/')
+        if not api_key or not base_url:
+            return None
         clean_rid = clean_range_id(range_str)
 
         if is_new_api(base_url):
@@ -984,7 +990,7 @@ async def monitor_loop(app):
         try:
             settings = load_settings()
             api_key = settings.get("api_key")
-            base_url = settings.get("base_url").rstrip('/')
+            base_url = (settings.get("base_url") or "").rstrip('/')
             otp_target_raw = settings.get("otp_group_id", "")
             otp_reward = settings.get("otp_reward", 0.0020)
 
@@ -994,7 +1000,7 @@ async def monitor_loop(app):
                 otp_target = str(otp_target_raw).strip()
 
 
-            if api_key:
+            if api_key and base_url:
                 if is_new_api(base_url):
                     api_headers = {
                         "mauthapi": api_key,
